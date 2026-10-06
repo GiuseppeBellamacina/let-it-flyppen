@@ -1,0 +1,38 @@
+[project]
+name = "let-it-flyppen"
+version = "0.2.0"
+description = "Five Drosophila brains (FlyWire connectome) learn to play Let It Happen"
+readme = "README.md"
+requires-python = ">=3.10,<3.11"  # basic-pitch: on >=3.11 it wants tensorflow<2.15.1 (no 3.12 wheel); on 3.10 it uses ONNX
+dependencies = [
+    "torch",
+    "numpy",
+    "pandas",
+    "pyarrow",
+    "fastapi",
+    "uvicorn[standard]",
+]
+
+[project.optional-dependencies]
+# mp3 -> stems -> notes (prep.py song). uv sync --extra prep
+prep = [
+    "demucs",
+    "torchaudio",
+    "basic-pitch[onnx]",
+    "librosa",
+    "soundfile",
+    "pretty_midi",
+    "setuptools<81",  # resampy (via basic-pitch) imports pkg_resources
+]
+
+[tool.uv]
+package = false
+
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu126" }
+torchaudio = { index = "pytorch-cu126" }

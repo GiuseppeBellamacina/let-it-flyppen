@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Let It Flyppen</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Righteous&family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+<script type="importmap">
+{ "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+               "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/" } }
+</script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/tone/15.1.22/Tone.js"></script>
+</head>
+<body>
+<div id="ui">
+  <header id="top" class="panel">
+    <h1>Let It Flyppen</h1>
+    <dl class="facts">
+      <div><dt>rehearsal</dt><dd id="pass">–</dd></div>
+      <div><dt>mode</dt><dd id="mode">waiting</dd></div>
+      <div><dt>section</dt><dd id="section">–</dd></div>
+      <div><dt>tempo</dt><dd id="bpm">–</dd></div>
+      <div><dt>position</dt><dd id="pos">–</dd></div>
+    </dl>
+    <div class="progress" role="progressbar" aria-label="Position in the rehearsal" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><i id="progress"></i></div>
+    <p id="status" aria-live="polite">waiting for the server…</p>
+  </header>
+
+  <aside id="left">
+    <section class="panel" aria-labelledby="h-roll">
+      <h2 id="h-roll">Piano roll · <span id="roll-name">Drums</span></h2>
+      <canvas id="roll" aria-label="Notes expected and played by the selected member"></canvas>
+      <p class="legend"><span class="lg ghost"></span>score <span class="lg ok"></span>correct <span class="lg bad"></span>wrong</p>
+    </section>
+    <section class="panel" aria-labelledby="h-raster">
+      <h2 id="h-raster">Output neurons · <span id="raster-name">Drums</span></h2>
+      <div class="raster-wrap"><canvas id="raster" width="128" height="48" aria-label="Spikes of 48 output neurons per sixteenth"></canvas>
+        <p id="raster-empty">waiting for live rehearsals…</p></div>
+      <p class="legend">48 sampled neurons · one column per sixteenth</p>
+    </section>
+    <section class="panel" aria-labelledby="h-chart">
+      <h2 id="h-chart">Band average F1 per rehearsal</h2>
+      <svg id="chart" viewBox="0 0 320 130" role="img" aria-label="Average F1 per rehearsal"></svg>
+    </section>
+  </aside>
+
+  <div id="free" aria-hidden="true"></div>
+
+  <aside id="right" aria-label="The band">
+    <div id="cards"></div>
+    <div id="controls" class="panel">
+      <div class="seg" role="group" aria-label="What you hear">
+        <button data-mode="play" class="on" aria-pressed="true">Flies</button>
+        <button data-mode="target" aria-pressed="false" title="The transcribed notes, played by the same synths">Score</button>
+        <button data-mode="record" aria-pressed="false" title="The real recording, in time with the band">Original</button>
+      </div>
+      <button id="home" title="Back to the overview (Esc)">Stage</button>
+      <button id="info-btn" aria-expanded="false" aria-controls="info" title="How it works (I)">?</button>
+    </div>
+  </aside>
+
+  <p id="hint"><kbd>1</kbd>–<kbd>5</kbd> member · <kbd>O</kbd> flies/score/original · <kbd>H</kbd> interface · <kbd>I</kbd> info · <kbd>Esc</kbd> stage</p>
+</div>
+
+<section id="info" class="panel" hidden aria-labelledby="h-info">
+  <button class="close" aria-label="Close">×</button>
+  <h2 id="h-info">How it works</h2>
+  <div id="info-body"><p>Waiting for the server…</p></div>
+</section>
+<p id="shown-hint" hidden><kbd>H</kbd> show the interface</p>
+
+<div id="gate">
+  <div>
+    <h2>Let It Flyppen</h2>
+    <p>Each fly has its own simulated brain (the FlyWire connectome) and is learning its part. Come in: you will hear the rehearsals live.</p>
+    <button id="enter">Enter the venue</button>
+  </div>
+</div>
+<script type="module" src="app.js"></script>
+</body>
+</html>
