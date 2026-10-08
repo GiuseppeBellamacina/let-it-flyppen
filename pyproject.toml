@@ -23,6 +23,9 @@ prep = [
     "soundfile",
     "pretty_midi",
     "setuptools<81",  # resampy (via basic-pitch) imports pkg_resources
+    "trimesh",  # prep.py fly: flybody MuJoCo meshes -> data/fly.glb
+    "fast-simplification",  # trimesh decimation backend
+    "pillow",  # trimesh materials
 ]
 
 [tool.uv]

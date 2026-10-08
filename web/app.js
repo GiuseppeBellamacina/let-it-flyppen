@@ -1,5 +1,6 @@
 // Server connection, audio (Tone.js) and UI. The 3D stage lives in stage.js.
 import { createStage, MEMBERS, ORDER } from './stage.js';
+import { createBrainMap } from './brainmap.js';
 
 const $ = s => document.querySelector(s);
 const pct = x => (x == null || Number.isNaN(x)) ? '–' : `${Math.round(x * 100)}%`;
@@ -9,14 +10,17 @@ const noteName = m => typeof m === 'number' ? NOTE[m % 12] + (Math.floor(m / 12)
 const hash = new URLSearchParams(location.hash.slice(1));
 
 const stage = createStage(document.body);
+const brainmap = createBrainMap(document.querySelector("#brainmap"));  // "Inside the fly brain" panel (brainmap.js)
 const band = Object.fromEntries(ORDER.map(k => [k, {
   key: k, ...MEMBERS[k], tp: 0, fp: 0, fn: 0, nPlay: 0, nExp: 0, history: [], prec: null, rec: null,
   act: 0, actMax: 1, muted: false, solo: false, roll: [], ras: [], rasMax: 4, lut: null,
 }]));
 
 // ---------- audio ----------
-const master = new Tone.Volume(-4).toDestination();
-const verb = new Tone.Reverb({ decay: 3.2, wet: .28 }).connect(master);
+// master bus: gentle glue compression, then a ceiling so the full band never clips
+const master = new Tone.Volume(0).chain(new Tone.Compressor({ threshold: -18, ratio: 3, attack: .01, release: .2 }),
+  new Tone.Limiter(-1), Tone.getDestination());
+const verb = new Tone.Reverb({ decay: 3.2, wet: .18 }).connect(master);
 const phaser = new Tone.Phaser({ frequency: .25, octaves: 3, baseFrequency: 500, wet: .5 }).connect(verb);
 const chorus = new Tone.Chorus(2, 3, .4).connect(verb).start();
 const SYN = {
@@ -27,24 +31,71 @@ const SYN = {
   bass: new Tone.MonoSynth({ oscillator: { type: 'sawtooth' }, filter: { Q: 2, type: 'lowpass' },
     filterEnvelope: { baseFrequency: 90, octaves: 3, attack: .01, decay: .2, sustain: .3 },
     envelope: { attack: .005, decay: .2, sustain: .6, release: .2 }, volume: -8 }).connect(master),
-  guitar: new Tone.PolySynth(Tone.Synth, { oscillator: { type: 'fattriangle', count: 2, spread: 18 },
+  guitar: new Tone.PolySynth(Tone.Synth, { maxPolyphony: 64, oscillator: { type: 'fattriangle', count: 2, spread: 18 },
     envelope: { attack: .004, decay: .4, sustain: .2, release: .6 }, volume: -14 }).connect(chorus),
-  synth: new Tone.PolySynth(Tone.Synth, { oscillator: { type: 'fatsawtooth', count: 3, spread: 30 },
+  synth: new Tone.PolySynth(Tone.Synth, { maxPolyphony: 64, oscillator: { type: 'fatsawtooth', count: 3, spread: 30 },
     envelope: { attack: .02, decay: .3, sustain: .4, release: .8 }, volume: -20 }).connect(phaser),
   vocals: new Tone.Synth({ oscillator: { type: 'fmsine', modulationIndex: 2 },
     envelope: { attack: .04, decay: .2, sustain: .7, release: .5 }, volume: -10 }).connect(verb),
 };
-let listen = 'play', stepSec = .12, audioOn = false;
-const freq = m => Tone.Frequency(m, 'midi').toFrequency();
-function sound(key, notes, t) {
-  for (const [c, dur] of notes) {
-    const d = Math.max(.05, dur * stepSec * .95);
-    if (key === 'drums') {
-      if (c === 'kick') SYN.kick.triggerAttackRelease('C1', '8n', t);
-      if (c === 'snare') SYN.snare.triggerAttackRelease('16n', t);
-      if (c === 'hat') SYN.hat.triggerAttackRelease(300, '32n', t, .6);
-    } else SYN[key].triggerAttackRelease(freq(c), d, t);
+// Sampled instruments: notes cut from the song's own stems (hello.samples). Each part uses its synth above
+// until its sampler has loaded (or forever, if the server has no samples).
+// level (dB), destination and release per part: samples are all ~-20 dBFS RMS, so this is mostly about density
+// (synth plays ~8x the notes, in chords: lowest, behind the phaser; vocals upfront).
+const MIX = {
+  drums: { vol: -3, out: master, release: .08 },
+  bass: { vol: -3, out: master, release: .2 },
+  guitar: { vol: -6, out: chorus, release: .5 },
+  synth: { vol: -15, out: phaser, release: .6 },
+  vocals: { vol: 3, out: verb, release: .4 },
+};
+const DRUM = { kick: [36, 1], snare: [38, .8], hat: [42, .35] };  // drum name -> [midi slot, gain]
+const MONO = new Set(['bass', 'vocals']);  // a new note cuts the previous one (brain.py also plays guitar mono; here it rings)
+const DEBUG = hash.has('autoplay');
+let SAMP = {}, held = {}, sampKey = null, nTrig = 0, nSampled = 0;
+function loadSamples(samples) {
+  const key = JSON.stringify(samples ?? null);
+  if (key === sampKey) return;  // hello is resent on every reconnect: rebuild only if the urls changed
+  sampKey = key;
+  for (const s of Object.values(SAMP)) s.dispose();
+  SAMP = {}; held = {};
+  for (const [part, files] of Object.entries(samples ?? {})) {
+    if (!MIX[part] || !Object.keys(files).length) continue;
+    const urls = part === 'drums'
+      ? Object.fromEntries(Object.entries(files).filter(([c]) => DRUM[c]).map(([c, u]) => [DRUM[c][0], u]))
+      : files;  // keys are MIDI numbers: Tone.Sampler takes them as-is and repitches from the nearest
+    const s = SAMP[part] = new Tone.Sampler({ urls, baseUrl: '', attack: .005, release: MIX[part].release,
+      volume: MIX[part].vol, onerror: e => { s.failed = true; console.warn(`[audio] ${part} sample failed, keeping the synth`, e); },
+      onload: () => {  // a part whose sample fails never gets here and keeps its synth
+        s.ready = true;
+        const all = Object.values(SAMP);
+        if (SAMP[part] === s && all.every(x => x.ready)) console.info(`[audio] samplers ready: ${all.length}`);
+      } }).connect(MIX[part].out);
   }
+}
+let listen = 'play', stepSec = .12, audioOn = false, lastT = 0;
+const freq = m => Tone.Frequency(m, 'midi').toFrequency();
+const gain = v => .3 + .7 * Math.min(1, Math.max(0, v ?? .8));  // velocity 0-1 -> gain, with a floor
+function sound(key, notes, t) {
+  if (SAMP[key] && !SAMP[key].ready && !SAMP[key].failed) return;  // samples on their way: a moment of silence, not a burst of synths
+  const s = SAMP[key]?.ready ? SAMP[key] : null, mono = s && MONO.has(key), h = held[key];
+  // mono: notes are attacked without a scheduled release (Sampler forgets a note once its release is scheduled),
+  // and released here when they end or when the next one starts.
+  // ponytail: a part muted mid-note rings until its sample ends (<= 1.5 s)
+  if (mono && h && (notes.length || h <= t + stepSec)) { s.releaseAll(Math.max(Tone.now(), notes.length ? Math.min(h, t) : h)); held[key] = null; }
+  for (const [c, len = 1, vel] of notes) {
+    const v = gain(vel), d = Math.max(.05, len * stepSec);
+    if (DEBUG) { nTrig++; if (s) nSampled++; }
+    if (key === 'drums') {
+      if (s && DRUM[c]) s.triggerAttackRelease(freq(DRUM[c][0]), c === 'hat' ? .08 : .6, t, v * DRUM[c][1]);
+      else if (c === 'kick') SYN.kick.triggerAttackRelease('C1', '8n', t, v);
+      else if (c === 'snare') SYN.snare.triggerAttackRelease('16n', t, v);
+      else if (c === 'hat') SYN.hat.triggerAttackRelease(300, '32n', t, .6 * v);
+    } else if (mono) { s.triggerAttack(freq(c), t, v); held[key] = t + d; }
+    else if (s) s.triggerAttackRelease(freq(c), d, t, v);
+    else SYN[key].triggerAttackRelease(freq(c), d * .95, t, v);
+  }
+  if (DEBUG && nTrig >= 200) { console.info(`[audio] triggers: ${nTrig} (sampled ${nSampled})`); nTrig = nSampled = 0; }
 }
 const audible = m => ORDER.some(k => band[k].solo) ? m.solo : !m.muted;
 // "Original": the real recording, kept in time with the sixteenth the band is playing (msg.time)
@@ -97,6 +148,7 @@ function select(k, cam, instant = false) {
   for (const m of Object.values(band)) m.el.card.classList.toggle('sel', m.key === k);
   $('#roll-name').textContent = $('#raster-name').textContent = band[k].name;
   if (cam) stage.focus(k, instant);
+  brainmap.select(k);
   drawRaster();
 }
 function showCard(m) {
@@ -277,6 +329,8 @@ function onHello(h) {
   $('#section').textContent = section(h);
   $('#bpm').textContent = `${h.bpm} bpm`;
   showInfo(h); drawChart();
+  loadSamples(h.samples);
+  brainmap.onHello(h);
 }
 function onPass(p) {
   pass = p.n; $('#pass').textContent = `#${p.n}${p.fast ? '' : ' ✓'}`;
@@ -299,7 +353,9 @@ const nk = n => JSON.stringify(n[0]);
 function onStep(msg) {
   if (mode !== 'live') { setMode('live'); if (!started) { started = true; $('#pass').textContent = `#${pass + 1}`; } }  // connected mid-rehearsal: it is the one after those already finished
   tick++; lastStepAt = performance.now();
-  const t = audioOn ? Tone.now() + .06 : 0;
+  // strictly increasing: steps queued while the page was busy arrive in the same audio quantum, and Tone's synths
+  // throw on two attacks at the same time
+  const t = audioOn ? (lastT = Math.max(Tone.now() + .06, lastT + .005)) : 0;
   if (meta) {
     const [s0, s1] = meta.steps, f = (msg.i - s0 + 1) / Math.max(1, s1 - s0);
     $('#progress').style.width = `${Math.min(100, f * 100)}%`;
@@ -331,6 +387,7 @@ function onStep(msg) {
     f1sum += f1of(m.tp, m.fp, m.fn);
   });
   followRecording(msg.time);
+  brainmap.onStep(msg);
   $('#raster-empty').hidden = rasterSeen;
   if (!rasterSeen) $('#raster-empty').textContent = 'the server is not sending the raster';
   stage.setEnergy(.15 + .85 * f1sum / ORDER.length);
@@ -381,8 +438,10 @@ addEventListener('keydown', e => {
   else return;
   e.preventDefault();
 });
-$('#enter').onclick = async () => { await Tone.start(); audioOn = true; $('#gate').remove(); };
-if (hash.has('demo')) $('#gate').remove();  // visuals only, no audio (displays, screenshots)
+async function enableAudio() { await Tone.start(); audioOn = true; $('#gate')?.remove(); }
+$('#enter').onclick = enableAudio;
+if (hash.has('autoplay')) enableAudio();  // test hook: same path as the button, no click (needs an autoplay-permitting browser)
+if (hash.has('demo')) $('#gate')?.remove();  // visuals only, no audio (displays, screenshots)
 
 (function loop() { drawRoll(); requestAnimationFrame(loop); })();
 measure();

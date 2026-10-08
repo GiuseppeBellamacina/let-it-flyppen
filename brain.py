@@ -4,7 +4,8 @@ The connectome is frozen (reservoir): each fly "hears" the position in the song 
 Johnston's organ auditory neurons, and learns only a linear readout from its output neurons
 to the notes of its own part.
 
-  uv run brain.py      # self-check: speed, neuron response, learning over 8 bars
+  uv run brain.py                     # self-check: speed, neuron response, learning over 8 bars
+  uv run brain.py train [minutes]     # offline training on the whole song, early stopping -> data/readout.pt
 """
 import json
 import math
@@ -23,11 +24,13 @@ MONO = {"bass", "guitar", "vocals"}
 V0, VTH, T_MBR, TAU, T_REF, T_DLY, W_SYN, F_POI, R_POI = -52.0, -45.0, 20.0, 5.0, 2.2, 1.8, 0.275, 250, 0.150
 DT = 0.5  # ponytail: dt 0.5ms instead of 0.1ms to keep up with real time; lower it if rates drift from the reference
 N_DLY, N_REF = round(T_DLY / DT), round(T_REF / DT)
-RLS_P0 = 1.0  # RLS: initial covariance (= 1/regularization); lower = learns slower but smoother
+RLS_P0 = 10.0  # RLS: initial covariance (= 1/regularization); picked by `brain.py train` (1.0 and 0.1 scored lower)
 N_RASTER = 48  # output neurons (the most active) shown in the stage raster
 EARS = ["auditory", "wind_gravity", "grooming"]  # antennal JO neurons: the "sound" input
 PROBE_STEPS = 16
 BINS = 4  # spike counts in 4 sub-windows per sixteenth: 4x features (rank) at zero simulation cost
+MAX_DUR = 16  # longest note the readout predicts, in sixteenths
+BRAIN_POINTS = 40000  # neurons drawn as the brain silhouette in the stage map (out of ~139k)
 
 
 def load_connectome():
@@ -35,7 +38,8 @@ def load_connectome():
     ids = pd.read_csv(DATA / "Completeness_783.csv", index_col=0).index
     c = pd.read_parquet(DATA / "Connectivity_783.parquet",
                         columns=["Presynaptic_Index", "Postsynaptic_Index", "Excitatory x Connectivity"])
-    ann = (pd.read_csv(DATA / "annotations.tsv", sep="\t", usecols=["root_id", "super_class", "cell_sub_class"],
+    ann = (pd.read_csv(DATA / "annotations.tsv", sep="\t",
+                       usecols=["root_id", "super_class", "cell_sub_class", "pos_x", "pos_y", "pos_z"],
                        low_memory=False).drop_duplicates("root_id").set_index("root_id").reindex(ids))
     edges = (c.Postsynaptic_Index.values, c.Presynaptic_Index.values, c["Excitatory x Connectivity"].values * W_SYN)
     return edges, ann.reset_index().rename(columns={"index": "root_id"})
@@ -55,29 +59,38 @@ def matrix(edges, n, keep=None, dev="cuda"):
 
 
 class Part:
-    """A fly's readout: features -> note onsets of its part.
+    """A fly's readout: features -> note onsets of its part, plus how loud and how long they are.
 
     Linear regression learned online with recursive least squares (RLS): at every sixteenth, the exact
     least-squares solution over everything heard so far. Converges in 1-2 rehearsals even on the whole
-    song (NLMS gradient descent needed ~30)."""
+    song (NLMS gradient descent needed ~30). Two weight blocks share the same P: W picks the notes,
+    R predicts velocity per class and the note length. RLS columns are independent, so R never
+    changes which notes are played."""
 
     def __init__(self, name, spec, n_steps, n_feat, dev):
         self.name, self.classes, self.mono = name, spec["classes"], name in MONO
         C = len(self.classes)
         Y = torch.zeros(n_steps, C + self.mono)
-        for s, c, _ in spec["events"]:
+        Yr = torch.zeros(n_steps, C + 1)  # velocity of each class at its onset, then the length / MAX_DUR
+        self.truth = {}  # step -> {class: (length, velocity)} as in the song
+        durs = {}
+        for s, c, d, *v in spec["events"]:
+            vel = v[0] if v else 0.8
+            durs.setdefault(c, []).append(d)
             if s < n_steps:
-                Y[s, c] = 1
+                Y[s, c], Yr[s, c] = 1, vel
+                Yr[s, C] = max(Yr[s, C], min(d, MAX_DUR) / MAX_DUR)
+                self.truth.setdefault(s, {})[c] = (d, vel)
         if self.mono:  # extra "no onset" class: the note played is the argmax
             Y[:, C] = Y[:, :C].sum(1) == 0
-        self.Y = Y.to(dev)
+        self.Y, self.Yr = Y.to(dev), Yr.to(dev)
         self.W = torch.zeros(n_feat + 1, Y.shape[1], device=dev)
+        self.R = torch.zeros(n_feat + 1, Yr.shape[1], device=dev)
+        self.z = torch.zeros(C + self.mono, device=dev)
         self.reset_learning()
-        durs = {}
-        for _, c, d in spec["events"]:
-            durs.setdefault(c, []).append(d)
         self.dur = [int(np.median(durs.get(c, [1]))) for c in range(C)]
         self.tp = self.fp = self.fn = 0
+        self.vel_err = self.dur_err = self.n_err = 0.0
 
     def reset_learning(self):
         # ponytail: P (~50 MB in float64) is not saved; on resume it restarts from RLS_P0 with the already learned W
@@ -85,30 +98,57 @@ class Part:
         self.P = torch.eye(n, dtype=torch.float64, device=self.W.device) * RLS_P0
 
     def __call__(self, x, s, learn=True):
-        """x: spike counts (F+1,) with bias. Return (played indices, expected indices)."""
+        """x: spike counts (F+1,) with bias. Return (played, expected) as lists of (class index, length, velocity)."""
         C, y = len(self.classes), self.Y[s]
-        z = x @ self.W
+        z, zr = x @ self.W, x @ self.R
+        self.z = z
         if self.mono:
             k = int(z.argmax())
-            played = [] if k == C else [k]
+            idx = [] if k == C else [k]
         else:
-            played = (z > 0.5).nonzero().flatten().tolist()
+            idx = (z > 0.5).nonzero().flatten().tolist()
+        played = []
+        if idx:
+            reg = zr.tolist()
+            for c in idx:
+                length = int(np.clip(round(reg[C] * MAX_DUR), 1, MAX_DUR)) if self.mono else self.dur[c]
+                played.append((c, length, round(float(np.clip(reg[c], 0.15, 1.0)), 2)))
         if learn:
             xd = x.double()
             Px = self.P @ xd
             gain = Px / (1 + xd @ Px)
             self.P -= torch.outer(gain, Px)
-            self.W += torch.outer(gain.float(), y - z)
-        target = y[:C].nonzero().flatten().tolist()
-        hit = len(set(played) & set(target))
-        self.tp, self.fp, self.fn = self.tp + hit, self.fp + len(played) - hit, self.fn + len(target) - hit
+            g = gain.float()
+            self.W += torch.outer(g, y - z)
+            self.R += torch.outer(g, self.Yr[s] - zr)
+        target = [(c, *self.truth[s][c]) for c in sorted(self.truth.get(s, {}))]
+        hit = len(set(idx) & {t[0] for t in target})
+        for c, length, vel in played:  # how close loudness and length are, on the right notes
+            if c in self.truth.get(s, {}):
+                d, v = self.truth[s][c]
+                self.vel_err += abs(vel - v)
+                self.dur_err += abs(length - min(d, MAX_DUR)) if self.mono else 0.0
+                self.n_err += 1
+        self.tp, self.fp, self.fn = self.tp + hit, self.fp + len(idx) - hit, self.fn + len(target) - hit
         return played, target
+
+    def top(self, k=5):
+        """The k classes the readout scores highest right now: [(class value, score)], with "rest" for no note
+        (the mono parts' extra class; for polyphonic parts 1 - the best note score)."""
+        C = len(self.classes)
+        names = self.classes + ["rest"]
+        z = self.z if self.mono else torch.cat([self.z, (1 - self.z.max()).clamp(0, 1).view(1)])
+        vals, idx = z.topk(min(k, C + 1))
+        return [(names[i], round(float(v), 3)) for v, i in zip(vals.tolist(), idx.tolist())]
 
     def score(self):
         """F1, precision and recall on onsets since the last call (and reset the counters)."""
         tp, fp, fn = self.tp, self.fp, self.fn
+        n, ve, de = max(1, self.n_err), self.vel_err, self.dur_err
         self.tp = self.fp = self.fn = 0
-        return {"f1": 2 * tp / max(1, 2 * tp + fp + fn), "precision": tp / max(1, tp + fp), "recall": tp / max(1, tp + fn)}
+        self.vel_err = self.dur_err = self.n_err = 0.0
+        return {"f1": 2 * tp / max(1, 2 * tp + fp + fn), "precision": tp / max(1, tp + fp), "recall": tp / max(1, tp + fn),
+                "vel_mae": ve / n, "dur_mae": de / n}
 
     def f1(self):
         return self.score()["f1"]
@@ -132,6 +172,7 @@ class Band:
         alive = np.union1d(np.flatnonzero(fired > 0), ears)
         self.M, self.N = matrix(edges, self.N, alive, dev), len(alive)
         self.neurons = ann.iloc[alive].reset_index(drop=True)  # root_id / class of each simulated neuron
+        self.layout(ann, alive)
         rng = np.random.default_rng(0)
         ears = rng.permutation(np.searchsorted(alive, ears))
         self.ear_pos, self.ear_bar = np.array_split(ears, 2)  # half hears the sixteenth within the bar, half the bar
@@ -143,6 +184,20 @@ class Band:
         self.raster = torch.tensor(np.argsort(-fired[alive[feat]], kind="stable")[:N_RASTER], device=dev)
         self.parts = [Part(p, song["parts"][p], song["n_steps"], BINS * len(feat), dev) for p in PARTS]
         self.reset()
+
+    def layout(self, ann, alive):
+        """3D positions for the stage brain map: a silhouette of the whole brain and the simulated neurons.
+        FlyWire voxels are 4x4x40 nm, so z is stretched x10; ~600 neurons without annotation have no position."""
+        pos = ann[["pos_x", "pos_y", "pos_z"]].to_numpy(float) * [1, 1, 10]
+        known = ~np.isnan(pos).any(1)
+        center = pos[known].mean(0)
+        scale = np.abs(pos[known] - center).max()
+        pos = (pos - center) / scale
+        rng = np.random.default_rng(0)
+        shape = rng.choice(np.flatnonzero(known), min(BRAIN_POINTS, int(known.sum())), replace=False)
+        self.shape_pos = pos[shape].astype(np.float32)
+        self.alive_pos = np.nan_to_num(pos[alive], nan=0.0).astype(np.float32)  # unknown -> brain centre
+        self.alive_class = ann.super_class.iloc[alive].fillna("unknown").tolist()
 
     def reset(self):
         z = lambda: torch.zeros(self.N, self.B, device=self.dev)
@@ -156,7 +211,9 @@ class Band:
 
     def listen(self, s):
         """Simulate the 5 brains for sixteenth s. Return spike counts (B, BINS*F) of the output neurons."""
-        return self.run(self.code(s), seed=s)[:, self.feat].permute(2, 0, 1).reshape(self.B, -1)
+        counts = self.run(self.code(s), seed=s)
+        self.last_counts = counts.sum(0)  # (N, B): every simulated neuron, for the brain map
+        return counts[:, self.feat].permute(2, 0, 1).reshape(self.B, -1)
 
     @torch.no_grad()
     def run(self, ear, seed=None):
@@ -184,7 +241,8 @@ class Band:
 
     @torch.no_grad()
     def play(self, r, s, learn=True):
-        """r: (B, BINS*F) from listen. Each fly plays (and learns) its part. Return {part: (played, expected)}."""
+        """r: (B, BINS*F) from listen. Each fly plays (and learns) its part.
+        Return {part: (played, expected)}, notes as (class index, length, velocity)."""
         x = torch.cat([r, torch.ones(self.B, 1, device=self.dev)], 1)
         return {p.name: p(x[i], s, learn) for i, p in enumerate(self.parts)}
 
@@ -193,15 +251,16 @@ class Band:
         return r.view(self.B, BINS, -1).sum(1)[:, self.raster]
 
     def state(self):
-        return {"W": [p.W for p in self.parts], "feat": self.feat}
+        return {"W": [p.W for p in self.parts], "R": [p.R for p in self.parts], "feat": self.feat}
 
     def load(self, st):
         """Resume a saved readout only if circuit and classes match. Return whether it was applied."""
         ok = (st["feat"].shape == self.feat.shape and bool((st["feat"].to(self.dev) == self.feat).all())
-              and all(p.W.shape == W.shape for p, W in zip(self.parts, st["W"])))
+              and "R" in st and all(p.W.shape == W.shape and p.R.shape == R.shape
+                                    for p, W, R in zip(self.parts, st["W"], st["R"])))
         if ok:
-            for p, W in zip(self.parts, st["W"]):
-                p.W = W.to(self.dev)
+            for p, W, R in zip(self.parts, st["W"], st["R"]):
+                p.W, p.R = W.to(self.dev), R.to(self.dev)
         return ok
 
 
@@ -260,7 +319,67 @@ def self_check(steps=128, train_passes=3):
     return ms, song["step_sec"] * 1000, responding, test
 
 
+def quality(scores):
+    """One number to maximize: right notes first, then right loudness (0-1) and length (sixteenths)."""
+    return float(np.mean([v["f1"] - 0.1 * v["vel_mae"] - 0.02 * v["dur_mae"] for v in scores.values()]))
+
+
+def train(minutes=45.0, patience=3, tol=1e-4, p0s=(1.0, 10.0, 0.1)):
+    """Offline training on the whole song, no audio, no real time: rehearse from a cached simulation until the
+    readout stops improving on a fresh simulation (early stopping), for a few RLS regularizations; keep the best."""
+    global RLS_P0
+    t0 = time.time()
+    deadline = t0 + minutes * 60
+    song = load_song()
+    band = Band(song)
+    steps = range(song["n_steps"])
+    print(f"simulating the whole song twice ({len(steps)} sixteenths): one to learn from, one fresh to check...")
+    caches = []
+    for _ in range(2):
+        band.reset()
+        caches.append(torch.stack([band.listen(s) for s in steps]))
+    print(f"  done in {time.time() - t0:.0f}s")
+    log, best = [], (-np.inf, None, None)
+    for p0 in p0s:
+        if time.time() > deadline:
+            break
+        RLS_P0 = p0
+        band.parts = [Part(p, song["parts"][p], song["n_steps"], caches[0].shape[2], band.dev) for p in PARTS]
+        run_best, bad, n = -np.inf, 0, 0
+        while time.time() < deadline and bad < patience:
+            n += 1
+            for s in steps:
+                band.play(caches[0][s], s)
+            train_q = quality({p.name: p.score() for p in band.parts})
+            for s in steps:
+                band.play(caches[1][s], s, learn=False)
+            sc = {p.name: p.score() for p in band.parts}
+            q = quality(sc)
+            log.append({"p0": p0, "rehearsal": n, "train": round(train_q, 5), "check": round(q, 5),
+                        "parts": {k: {m: round(x, 4) for m, x in v.items()} for k, v in sc.items()}})
+            print(f"P0={p0:<4} rehearsal {n:2d}: quality {q:.4f} (train {train_q:.4f})  "
+                  + "  ".join(f"{k} F1 {v['f1']:.3f} vel±{v['vel_mae']:.3f} len±{v['dur_mae']:.2f}" for k, v in sc.items()))
+            if q > run_best + tol:
+                run_best, bad = q, 0
+                if q > best[0]:
+                    best = (q, p0, {"W": [p.W.clone() for p in band.parts], "R": [p.R.clone() for p in band.parts],
+                                    "feat": band.feat})
+            else:
+                bad += 1
+        print(f"P0={p0}: best quality {run_best:.4f} ({'early stop' if bad >= patience else 'time up'} after {n} rehearsals)")
+    q, p0, state = best
+    torch.save(state, DATA / "readout.pt")
+    (DATA / "train-log.json").write_text(json.dumps({"best_quality": q, "best_p0": p0, "minutes": round((time.time() - t0) / 60, 1),
+                                                       "log": log}, indent=1))
+    print(f"best: quality {q:.4f} with P0={p0} -> {DATA / 'readout.pt'} (log in train-log.json), "
+          f"{(time.time() - t0) / 60:.1f} min")
+
+
 if __name__ == "__main__":
+    import sys
+    if sys.argv[1:2] == ["train"]:
+        train(float(sys.argv[2]) if len(sys.argv) > 2 else 45.0)
+        sys.exit()
     ms, budget, responding, test = self_check()
     assert ms < budget, "simulation slower than real time"
     assert responding > 100, "too few neurons respond to the antennae"

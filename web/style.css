@@ -49,9 +49,9 @@ h2 span { color: var(--ink); }
 #status { grid-column: 2; margin: 0; color: var(--dim); min-height: 1em; font-size: 11px; }
 
 /* ---------- left panels ---------- */
-#roll { width: 100%; height: 190px; border-radius: 8px; background: #0b0714; }
+#roll { width: 100%; height: 122px; border-radius: 8px; background: #0b0714; }
 .raster-wrap { position: relative; }
-#raster { width: 100%; height: 96px; border-radius: 8px; background: #0b0714; image-rendering: pixelated; }
+#raster { width: 100%; height: 30px; border-radius: 6px; background: #0b0714; image-rendering: pixelated; }
 #raster-empty { position: absolute; inset: 0; margin: 0; display: grid; place-items: center; color: var(--faint); }
 #raster-empty[hidden] { display: none; }
 .legend { margin: 6px 0 0; color: var(--faint); font-size: 10.5px; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; }
@@ -59,7 +59,43 @@ h2 span { color: var(--ink); }
 .lg:first-child { margin-left: 0; }
 .lg.ghost { border: 1px solid rgba(255, 255, 255, .55); background: rgba(255, 255, 255, .08); }
 .lg.ok { background: var(--ok); } .lg.bad { background: var(--bad); }
-#chart { width: 100%; height: auto; display: block; }
+#chart { width: 100%; height: auto; max-height: 100px; display: block; }
+
+/* ---------- inside the fly brain ---------- */
+#brainmap { --c: #ff7a3d; display: flex; flex-direction: column; gap: 5px;
+  background: radial-gradient(120% 60% at 50% 28%, rgba(30, 60, 140, .22), transparent 70%), rgba(8, 8, 22, .82); }
+#brainmap h2 { margin: 0; white-space: nowrap; }
+.bm-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.bm-sub { margin: -4px 0 0; color: var(--faint); font-size: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#raster-name { color: var(--c); font-weight: 600; }
+.bm-seg { flex: none; display: flex; gap: 2px; background: rgba(0, 0, 0, .3); border-radius: 8px; padding: 2px; }
+.bm-seg button { border: 0; background: transparent; color: var(--dim); border-radius: 6px; padding: 3px 6px; font-size: 9.5px; white-space: nowrap; }
+.bm-seg button.on { background: rgba(79, 227, 255, .16); color: #bff4ff; font-weight: 600; }
+.bm-view { position: relative; height: 150px; margin: 0 -6px; cursor: grab; touch-action: none; }
+.bm-view:active { cursor: grabbing; }
+.bm-view canvas { width: 100%; height: 100%; }
+.bm-lobes { position: absolute; left: 10px; right: 10px; bottom: 2px; display: flex; justify-content: space-between; margin: 0;
+  pointer-events: none; color: var(--faint); font-size: 9px;
+  letter-spacing: .12em; text-transform: uppercase; }
+.bm-legend { position: absolute; left: 10px; right: 10px; top: 2px; margin: 0; pointer-events: none; gap: 0 9px; font-size: 9px; }
+.bm-legend span { display: inline-flex; align-items: center; gap: 4px; }
+.bm-legend i { width: 7px; height: 7px; border-radius: 50%; }
+.bm-grad { width: 54px; height: 6px; border-radius: 3px; background: linear-gradient(90deg, #12204a, #1f48d9, #26f2ff, #fff); }
+.bm-grid { display: grid; grid-template-columns: 112px 1fr; gap: 10px; }
+.bm-counts { margin: 0; display: flex; flex-direction: column; gap: 6px; }
+.bm-counts dd { margin: 0; font-size: 22px; line-height: 1.05; font-weight: 700; color: #bff4ff; font-variant-numeric: tabular-nums; }
+.bm-counts dt { order: 2; color: var(--faint); font-size: 9.5px; }
+.bm-counts div { display: flex; flex-direction: column-reverse; }
+#brainmap h3 { margin: 0 0 3px; font: 600 9.5px "JetBrains Mono", monospace; letter-spacing: .1em; text-transform: uppercase; color: var(--dim); }
+.bm-bars { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; font-size: 10px; font-variant-numeric: tabular-nums; }
+.bm-bars li { display: grid; grid-template-columns: 38px 1fr 30px; gap: 6px; align-items: center; color: var(--dim); }
+.bm-bars li.none { display: block; color: var(--faint); }
+.bm-bars i { height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; }
+.bm-bars b { display: block; height: 100%; background: color-mix(in srgb, var(--c) 45%, transparent); transition: width .1s; }
+.bm-bars em { font-style: normal; text-align: right; }
+.bm-bars li.hit { color: var(--ink); }
+.bm-bars li.hit b { background: var(--c); box-shadow: 0 0 6px var(--c); }
+.bm-note { margin: 0; color: var(--faint); font-size: 9px; }
 #chart text { font: 9px "JetBrains Mono", monospace; fill: var(--faint); }
 
 /* ---------- member cards ---------- */
@@ -124,7 +160,7 @@ h2 span { color: var(--ink); }
   #left { flex-direction: row; overflow: visible; }
   #left > section { flex: 1; min-width: 0; }
   #left > section:nth-child(3) { display: none; }
-  #roll { height: 120px; } #raster { height: 72px; }
+  #roll { height: 120px; } .bm-view { height: 150px; }
 }
 /* ---------- phones: everything in one column, the page scrolls over the scene ---------- */
 @media (max-width: 720px) {
@@ -139,7 +175,7 @@ h2 span { color: var(--ink); }
   #top h1 { font-size: 22px; grid-row: auto; }
   #status { grid-column: 1; }
   .facts { gap: 2px 14px; }
-  #roll { height: 160px; } #raster { height: 80px; }
+  #roll { height: 160px; } .bm-view { height: 220px; }
   #hint { display: none; }
 }
 @media (prefers-reduced-motion: reduce) { #mode.live::before { animation: none; } }

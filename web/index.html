@@ -35,11 +35,31 @@
       <canvas id="roll" aria-label="Notes expected and played by the selected member"></canvas>
       <p class="legend"><span class="lg ghost"></span>score <span class="lg ok"></span>correct <span class="lg bad"></span>wrong</p>
     </section>
-    <section class="panel" aria-labelledby="h-raster">
-      <h2 id="h-raster">Output neurons · <span id="raster-name">Drums</span></h2>
+    <section id="brainmap" class="panel" aria-labelledby="h-brain">
+      <div class="bm-head">
+        <h2 id="h-brain">Inside the fly brain</h2>
+        <div class="bm-seg" role="group" aria-label="Neuron colors">
+          <button data-view="0" class="on" aria-pressed="true">Live spikes</button>
+          <button data-view="1" aria-pressed="false">Cell colors</button>
+        </div>
+      </div>
+      <p class="bm-sub"><span id="raster-name">Drums</span> · <span class="bm-n">139,255 neurons · FlyWire v783 connectome</span></p>
+      <div class="bm-view"><canvas aria-label="3D map of the selected fly's brain: simulated neurons light up when they spike (drag to rotate)"></canvas>
+        <p class="legend bm-legend"></p>
+        <p class="bm-lobes" aria-hidden="true"><span>optic lobe</span><span>central brain</span><span>optic lobe</span></p></div>
       <div class="raster-wrap"><canvas id="raster" width="128" height="48" aria-label="Spikes of 48 output neurons per sixteenth"></canvas>
         <p id="raster-empty">waiting for live rehearsals…</p></div>
-      <p class="legend">48 sampled neurons · one column per sixteenth</p>
+      <div class="bm-grid">
+        <dl class="bm-counts">
+          <div><dt>spikes / sixteenth</dt><dd class="bm-spikes">–</dd></div>
+          <div><dt>active neurons</dt><dd class="bm-active">–</dd></div>
+        </dl>
+        <div>
+          <h3>Neural readout</h3>
+          <ol class="bm-bars"><li class="none">waiting for live rehearsals…</li></ol>
+        </div>
+      </div>
+      <p class="bm-note">Real spikes from the simulated circuit (Shiu et al. 2024 LIF on FlyWire v783)</p>
     </section>
     <section class="panel" aria-labelledby="h-chart">
       <h2 id="h-chart">Band average F1 per rehearsal</h2>

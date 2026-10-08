@@ -7,6 +7,7 @@ import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js'
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 
 export const MEMBERS = {
   drums:  { name: 'Drums',    color: '#ff7a3d', pos: [0, .7, -3.1], rot: 0 },
@@ -141,20 +142,34 @@ function makeHair() {
 }
 
 // ---------- the singer's look (from the reference photos in ref/) ----------
-// cream mohair sweater with brown Fair Isle bands, white mirrored sport sunglasses, necklaces.
-function fairIsle(bands) {  // pattern bands on cream wool; bands = [[y0, y1] as fractions of the height]
+// fluffy white mohair sweater with charcoal Nordic rosettes, ivory sunglasses with dark tinted lenses, beaded necklaces.
+function fairIsle(bands) {  // pattern bands on white mohair; bands = [[y0, y1] as fractions of the height]
   return canvasTex(512, 256, (g, w, h) => {
-    g.fillStyle = '#eee4d2'; g.fillRect(0, 0, w, h);
-    for (let i = 0; i < 2600; i++) { g.fillStyle = `rgba(${Math.random() < .5 ? '255,250,240' : '190,170,140'},.35)`; g.fillRect(Math.random() * w, Math.random() * h, 2, 1); }
+    g.fillStyle = '#ece8df'; g.fillRect(0, 0, w, h);
+    for (let i = 0; i < 4000; i++) {  // fuzzy fibres
+      g.strokeStyle = `rgba(${Math.random() < .6 ? '255,253,248' : '196,188,174'},.4)`; g.lineWidth = 1;
+      const x = Math.random() * w, y = Math.random() * h, a = Math.random() * 6.3, l = 2 + Math.random() * 5;
+      g.beginPath(); g.moveTo(x, y); g.lineTo(x + Math.cos(a) * l, y + Math.sin(a) * l); g.stroke();
+    }
+    g.filter = 'blur(1.6px)';  // mohair: the knit motifs are soft-edged, never crisp
     for (const [a, b] of bands) {
-      const y0 = a * h, y1 = b * h, hh = y1 - y0, n = 16, cw = w / n;
-      g.fillStyle = '#4a2e1c'; g.fillRect(0, y0, w, hh * .1); g.fillRect(0, y1 - hh * .1, w, hh * .1);
-      for (let i = 0; i < n; i++) {  // alternating leaves / diamonds
-        const cx = (i + .5) * cw, cy = (y0 + y1) / 2;
-        g.fillStyle = i % 2 ? '#4a2e1c' : '#7a5a3c';
-        g.beginPath(); g.moveTo(cx, y0 + hh * .18); g.quadraticCurveTo(cx + cw * .45, cy, cx, y1 - hh * .18);
-        g.quadraticCurveTo(cx - cw * .45, cy, cx, y0 + hh * .18); g.fill();
-        g.fillStyle = '#4a2e1c'; g.fillRect(cx + cw * .5 - 2, cy - 2, 4, 4);
+      const y0 = a * h, y1 = b * h, hh = y1 - y0, n = 8, cw = w / n, cy = (y0 + y1) / 2, ink = '#2c2a28';
+      g.fillStyle = ink;
+      for (let x = 4; x < w; x += 12) {  // dotted rows above and below the band
+        g.beginPath(); g.arc(x, y0 + hh * .06, hh * .045, 0, 7); g.arc(x + 6, y1 - hh * .06, hh * .045, 0, 7); g.fill();
+      }
+      for (let i = 0; i < n; i++) {
+        const cx = (i + .5) * cw;
+        if (i % 2 === 0) {  // big rosette: five rounded petals round a dark core
+          for (let p = 0; p < 5; p++) {
+            const t = p / 5 * Math.PI * 2 - Math.PI / 2;
+            g.beginPath(); g.ellipse(cx + Math.cos(t) * hh * .22, cy + Math.sin(t) * hh * .22, hh * .2, hh * .12, t, 0, 7); g.fill();
+          }
+          g.beginPath(); g.arc(cx, cy, hh * .14, 0, 7); g.fill();
+        } else {  // pair of leaves on a stem
+          g.beginPath(); g.ellipse(cx - cw * .14, cy, cw * .2, hh * .15, -.5, 0, 7); g.ellipse(cx + cw * .14, cy, cw * .2, hh * .15, .5, 0, 7); g.fill();
+          g.fillRect(cx - 1.5, cy - hh * .3, 3, hh * .6);
+        }
       }
     }
   });
@@ -258,11 +273,398 @@ function makeFly(color, key) {
   });
   const hair = key === 'vocals' ? makeHair() : null;
   if (hair) { head.add(hair.group); dressKevin(body, head, arms); }
-  return { g, body, head, wings, arms, antMat, hair, hairLag: 0, hairVel: 0 };
+  const fly = { g, body, head, wings, arms, antMat, hair, hairLag: 0, hairVel: 0 };
+  fly.animate = (m, t, dt, beat) => {
+    body.position.y = m.hit * .07 + beat * .03;
+    head.rotation.x = -.1 + beat * (key === 'vocals' ? .26 : .18) + m.hit * .1;
+    head.rotation.z = key === 'vocals' ? Math.sin(t * 1.1) * .06 : 0;
+    arms.forEach((a, i) => a.rotation.x = -(i === m.arm ? m.hit : m.hit * .3) * .7);
+    const flap = (14 + 46 * m.act) * t;  // wingbeat = brain activity
+    wings.forEach((w, i) => w.rotation.y = (i ? -1 : 1) * (.25 + .25 * Math.sin(flap)));
+    antMat.emissiveIntensity *= Math.exp(-dt * 10);
+    if (hair) swayHair(fly, m, t, dt, head.rotation.x, head.rotation.z);
+  };
+  return fly;
+}
+function swayHair(fly, m, t, dt, hx, hz = 0) {  // the hair follows the head on a damped spring: lag + bounce
+  fly.hairVel += ((hx - fly.hairLag) * 60 - fly.hairVel * 9) * dt;
+  fly.hairLag += fly.hairVel * dt;
+  const swing = (fly.hairLag - hx) * 1.1;
+  for (const c of fly.hair.clumps) {
+    const { side, phase, weight } = c.userData;
+    c.rotation.x = swing * weight + Math.sin(t * 1.3 + phase) * .025;
+    c.rotation.z = side * (.02 + Math.sin(t * .9 + phase) * .025 + m.hit * .03) - hz * .6;
+  }
+}
+
+// ---------- flybody fly (data/fly.glb, made by `prep.py fly` from the Janelia/DeepMind MuJoCo model) ----------
+// glTF nodes = MuJoCo bodies with their hinge joints in userData.joints; MuJoCo frame: x forward, y left, z up.
+// The musician stands up: head up (+Y), belly to the audience (+Z), its left on +X.
+const FLY_H = 2.3;
+const ORIENT = new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().makeBasis(V(0, 1, 0), V(1, 0, 0), V(0, 0, -1)));
+const _jm = new THREE.Matrix4(), _jq = new THREE.Quaternion(), _jv = V(0, 0, 0), _jp = V(0, 0, 0);
+function rig(model) {  // q[joint] = angle; apply(): node.matrix = rest * J1 * J2 ..., J = T(pos) R(axis, q) T(-pos), XML order
+  const q = {}, def = {}, nodes = {}, bodies = [];
+  model.traverse(o => {
+    nodes[o.name] = o;
+    if (o.isMesh || !o.userData.joints) return;
+    o.updateMatrix(); o.matrixAutoUpdate = false;
+    bodies.push({ o, rest: o.matrix.clone(), joints: o.userData.joints });
+    for (const j of o.userData.joints) { q[j.name] = j.springref; def[j.name] = j; }
+  });
+  function apply() {
+    for (const { o, rest, joints } of bodies) {
+      o.matrix.copy(rest);
+      for (const j of joints) {
+        _jq.setFromAxisAngle(_jv.fromArray(j.axis), q[j.name]);
+        _jm.makeRotationFromQuaternion(_jq).setPosition(_jp.fromArray(j.pos).sub(_jv.fromArray(j.pos).applyQuaternion(_jq)));
+        o.matrix.multiply(_jm);
+      }
+      o.matrixWorldNeedsUpdate = true;
+    }
+  }
+  return { q, def, nodes, apply };
+}
+// coordinate descent IK: move `names` joints so that node `eff` reaches `target` (in the space of `root`, detached)
+function reach(r, root, names, eff, target, pull = .004) {
+  const p = V(0, 0, 0);
+  const lim = names.map(n => { const [a, b] = r.def[n].range; return a === b ? [-3, 3] : [a - .25, b + .25]; });
+  const cost = () => {
+    r.apply(); root.updateMatrixWorld(true);
+    return eff.getWorldPosition(p).distanceToSquared(target) + pull * names.reduce((s, n) => s + (r.q[n] - r.def[n].springref) ** 2, 0);
+  };
+  let best = cost();
+  for (let step = .3; step > .004;) {
+    let moved = false;
+    names.forEach((n, i) => {
+      for (const d of [step, -step]) {
+        const old = r.q[n]; r.q[n] = THREE.MathUtils.clamp(old + d, ...lim[i]);
+        const c = cost();
+        if (c < best - 1e-7) { best = c; moved = true; break; }
+        r.q[n] = old;
+      }
+    });
+    if (!moved) step *= .5;
+  }
+  r.apply(); root.updateMatrixWorld(true);
+  return Math.sqrt(best);
+}
+const legJoints = (r, leg, side, upTo = 'tarsus') => ['coxa', 'femur', 'tibia', 'tarsus'].slice(0, ['coxa', 'femur', 'tibia', 'tarsus'].indexOf(upTo) + 1)
+  .flatMap(b => r.nodes[`${b}_${leg}_${side}`].userData.joints.map(j => j.name));
+const SIDES = { left: 1, right: -1 };  // the fly's left is +X on stage
+
+function flyMaterials(proto) {  // once, on the shared prototype: amber cuticle, red eyes, glassy wings
+  const done = new Map();
+  proto.traverse(o => {
+    if (!o.isMesh) return;
+    const name = o.material.name;
+    if (!done.has(name)) {
+      const c = o.material.color.clone().convertSRGBToLinear();  // MuJoCo rgba are display colors
+      done.set(name,
+        name === 'body' ? new THREE.MeshPhysicalMaterial({ color: c, roughness: .42, clearcoat: .6, clearcoatRoughness: .35, sheen: .4, sheenColor: 0xffb070 }) :
+        name === 'lower' ? new THREE.MeshPhysicalMaterial({ color: c, roughness: .55, sheen: .3, sheenColor: 0xffe0b0 }) :
+        name === 'red' ? new THREE.MeshPhysicalMaterial({ color: 0xffffff, map: eyeTex, roughness: .3, clearcoat: 1, clearcoatRoughness: .2, emissive: 0x2a0000 }) :
+        name === 'membrane' ? new THREE.MeshPhysicalMaterial({ color: 0xdfe8f5, transparent: true, opacity: .32, roughness: .12, iridescence: 1,
+          iridescenceIOR: 1.6, iridescenceThicknessRange: [250, 700], side: THREE.DoubleSide, depthWrite: false }) :
+        name === 'brown' ? new THREE.MeshStandardMaterial({ color: 0x3a2214, roughness: .5, side: THREE.DoubleSide }) :
+        name === 'ocelli' ? new THREE.MeshPhysicalMaterial({ color: 0x5a2a10, roughness: .15, clearcoat: 1 }) :
+        new THREE.MeshStandardMaterial({ color: 0x120c08, roughness: .5 }));  // black / bristle-brown: bristles
+    }
+    o.material = done.get(name);
+    if (name === 'red' && !o.geometry.attributes.uv) {  // ommatidia: planar UVs across each eye (seen from the side)
+      const p = o.geometry.attributes.position, uv = new Float32Array(p.count * 2);
+      o.geometry.computeBoundingBox();
+      const bb = o.geometry.boundingBox, size = bb.getSize(V(0, 0, 0)), axes = [0, 1, 2].sort((a, b) => size.getComponent(a) - size.getComponent(b));
+      const [u, v] = [axes[1], axes[2]], k = 30 / size.getComponent(v);  // ~30 facets along the eye
+      for (let i = 0; i < p.count; i++) { uv[i * 2] = p.getComponent(i, u) * k; uv[i * 2 + 1] = p.getComponent(i, v) * k; }
+      o.geometry.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+    }
+    if (o.material.transparent || /black|brown|tarsus|claw/.test(o.name)) o.userData.noShadow = true;
+  });
+  eyeTex.wrapS = eyeTex.wrapT = THREE.RepeatWrapping; eyeTex.needsUpdate = true;
+}
+
+// arm targets (where the front-leg tips go), in the member's root space
+const HANDS = {
+  drums:  { left: [.38, 1.32, .72], right: [-.52, 1.08, .72] },   // tom / snare
+  bass:   { left: [.42, 1.38, .62], right: [-.08, 1.02, .7] },    // neck / strings
+  guitar: { left: [.4, 1.36, .62], right: [-.08, 1.0, .7] },
+  synth:  { left: [.32, 1.26, .74], right: [-.32, 1.26, .74] },   // keys
+  vocals: { left: [.32, 1.55, .66], right: [-.06, 1.6, .64] },    // gesture / mic stand
+};
+function makeFlybody(proto, color, key, offset) {
+  const g = new THREE.Group(), body = new THREE.Group(), orient = new THREE.Group(), model = proto.clone(true);
+  g.position.copy(offset); orient.quaternion.copy(ORIENT);
+  g.add(body); body.add(orient); orient.add(model);
+  const r = rig(model), n = r.nodes, q = r.q;
+  const antMat = new THREE.MeshPhysicalMaterial({ color: 0x9a6a3a, roughness: .45, emissive: new THREE.Color(color).multiplyScalar(.15), emissiveIntensity: 0 });
+  for (const s of ['left', 'right']) n[`antenna_${s}-body`].material = antMat;
+  const setup = () => { r.apply(); g.updateMatrixWorld(true); };  // g is detached here: world = the member's root space
+  // head: pitch it so the face looks at the audience
+  const pitch = n.head.userData.joints.map(j => j.name).find(j => j === 'head');
+  const face = V(0, 0, 0), hp = V(0, 0, 0), want = V(0, .25, 1).normalize();
+  let bestA = 0, bestD = -2;
+  for (let a = -1.6; a <= 1.6; a += .05) {
+    q[pitch] = a; setup();
+    n.head.getWorldPosition(hp);
+    face.addVectors(n.antenna_left.getWorldPosition(V(0, 0, 0)), n.antenna_right.getWorldPosition(V(0, 0, 0))).multiplyScalar(.5).sub(hp).normalize();
+    if (face.dot(want) > bestD) { bestD = face.dot(want); bestA = a; }
+  }
+  q[pitch] = bestA; setup();
+  // scale: thorax + head + abdomen = most of the height, the legs lift the abdomen tip a little off the floor
+  const box = new THREE.Box3();
+  for (const name of ['thorax-body', 'head-body', 'head-red', 'abdomen_8-body', 'abdomen_7-body']) if (n[name]) box.expandByObject(n[name], true);
+  const s = (FLY_H - .15) / (box.max.y - box.min.y);
+  orient.scale.setScalar(s); setup();
+  box.makeEmpty();
+  for (const name of ['thorax-body', 'head-body', 'head-red', 'abdomen_8-body', 'abdomen_7-body']) if (n[name]) box.expandByObject(n[name], true);
+  orient.position.y = .15 + offset.y - box.min.y; setup();
+  // standing on the hind and middle legs, front legs to the instrument
+  const feet = { T3: [.42, 0, .2], T2: [.72, 0, .62] };
+  for (const [side, sx] of Object.entries(SIDES)) {
+    for (const [leg, [x, y, z]] of Object.entries(feet)) reach(r, g, legJoints(r, leg, side), n[`claw_${leg}_${side}`], V(sx * x, y, z));
+    const [x, y, z] = HANDS[key][side];
+    reach(r, g, legJoints(r, 'T1', side), n[`claw_T1_${side}`], V(x, y, z));
+  }
+  const base = { ...q };
+  const fly = { g, body, head: n.head, wings: [], arms: [], antMat, hair: null, hairLag: 0, hairVel: 0, rig: r, base, model, n, s };
+  fly.animate = (m, t, dt, beat) => {
+    Object.assign(q, base);
+    body.position.y = m.hit * .02 + beat * .01;
+    q[pitch] = base[pitch] + beat * (key === 'vocals' ? .16 : .1) + m.hit * .06;
+    q.head_twist = Math.sin(t * 1.1 + ORDER.indexOf(key) * 1.7) * (key === 'vocals' ? .12 : .05);
+    for (const [side] of Object.entries(SIDES)) {  // strokes: the playing arm swings at the femur-tibia joint
+      const h = (side === 'left') === (m.arm === 1) ? m.hit : m.hit * .3;
+      q[`tibia_T1_${side}`] += h * .55; q[`femur_T1_${side}`] -= h * .25;
+      const buzz = m.act * (.5 + .5 * Math.sin((14 + 46 * m.act) * t));  // wings: open and buzz with brain activity
+      q[`wing_yaw_${side}`] = base[`wing_yaw_${side}`] - .35 * m.act - .25 * buzz;
+      q[`wing_roll_${side}`] = base[`wing_roll_${side}`] + .3 * buzz;
+    }
+    for (let i = 2; i <= 7; i++) q[`abdomen_${i}`] += Math.sin(t * 2.2 - i * .4) * .015;  // breathing
+    q.abdomen += Math.sin(t * 2.2) * .015;
+    r.apply();
+    antMat.emissiveIntensity *= Math.exp(-dt * 10);
+    if (fly.hair) swayHair(fly, m, t, dt, q[pitch] - base[pitch]);
+  };
+  return fly;
+}
+
+// ---------- Kevin Parker on the flybody fly: everything measured on the posed meshes (fly space = fly.g) ----------
+const strandTex = canvasTex(64, 256, (g, w, h) => {  // hair card: wavy strands of different lengths on transparent
+  g.clearRect(0, 0, w, h);
+  for (let i = 0; i < 70; i++) {
+    const x0 = Math.random() * w, len = h * (.7 + Math.random() * .3), l = 180 + Math.random() * 75;
+    g.strokeStyle = `rgba(${l},${l},${l},${.55 + Math.random() * .45})`; g.lineWidth = .8 + Math.random() * 1.8;
+    g.beginPath(); g.moveTo(x0, 0);
+    for (let y = 8; y <= len; y += 8) g.lineTo(x0 + Math.sin(y * .05 + i) * 2.5, y);
+    g.stroke();
+  }
+});
+function meshBox(meshes, into = new THREE.Box3(), filter = () => true) {  // precise box in fly space (g detached at the origin offset)
+  const v = V(0, 0, 0);
+  for (const m of meshes) {
+    const p = m.geometry.attributes.position;
+    for (let i = 0; i < p.count; i++) { v.fromBufferAttribute(p, i).applyMatrix4(m.matrixWorld); if (filter(v)) into.expandByPoint(v); }
+  }
+  return into;
+}
+function anchorAt(node, flyWorld, center) {  // group under `node` whose frame is fly space moved to `center` (follows the node)
+  const a = new THREE.Group(); a.matrixAutoUpdate = false;
+  a.matrix.copy(node.matrixWorld).invert().multiply(flyWorld).multiply(new THREE.Matrix4().makeTranslation(center.x, center.y, center.z));
+  node.add(a); return a;
+}
+function shell(mesh, d, flyWorld, uvOf) {  // copy of a mesh pushed out along its normals by d (fly units), UVs from fly-space position
+  const geo = mesh.geometry.clone(), p = geo.attributes.position, nrm = geo.attributes.normal, uv = new Float32Array(p.count * 2);
+  const toFly = new THREE.Matrix4().copy(flyWorld).invert().multiply(mesh.matrixWorld), k = d / mesh.matrixWorld.getMaxScaleOnAxis(), v = V(0, 0, 0);
+  for (let i = 0; i < p.count; i++) {
+    p.setXYZ(i, p.getX(i) + nrm.getX(i) * k, p.getY(i) + nrm.getY(i) * k, p.getZ(i) + nrm.getZ(i) * k);
+    uv.set(uvOf(v.fromBufferAttribute(p, i).applyMatrix4(toFly)), i * 2);
+  }
+  geo.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+  return geo;
+}
+function wrapGeo(pts, margin, NT = 48, NY = 30) {  // smooth tube round a point cloud (radius per height and angle), cylindrical UVs
+  const b = new THREE.Box3().setFromPoints(pts), c = b.getCenter(V(0, 0, 0)), y0 = b.min.y, y1 = b.max.y;
+  let r = Array.from({ length: NY + 1 }, () => new Array(NT).fill(0));
+  for (const p of pts) {
+    const iy = Math.round((p.y - y0) / (y1 - y0) * NY), it = Math.floor(((Math.atan2(p.x - c.x, p.z - c.z) / (2 * Math.PI) + 1) % 1) * NT) % NT;
+    r[iy][it] = Math.max(r[iy][it], Math.hypot(p.x - c.x, p.z - c.z));
+  }
+  for (let pass = 0; pass < 16; pass++) r = r.map((row, y) => row.map((v, t) => {  // fill the gaps, then smooth: no steps between rows
+    let sum = 0, k = 0;
+    for (let dy = -2; dy <= 2; dy++) for (let dt = -2; dt <= 2; dt++) { const w = r[THREE.MathUtils.clamp(y + dy, 0, NY)][(t + dt + NT) % NT]; if (w) { sum += w; k++; } }
+    return pass < 4 && v ? v : k ? sum / k : 0;
+  }));
+  const rows = r.map((row, y) => [y0 + (y1 - y0) * y / NY, row.map(v => v + margin)]);
+  rows.push([y1 + margin * .4, r[NY].map(v => v * .75 + margin)], [y1 + margin * .6, r[NY].map(v => v * .55)]);  // shoulders and crew neck
+  const pos = [], uv = [], idx = [], R = rows.length;
+  rows.forEach(([y, row], iy) => { for (let t = 0; t <= NT; t++) {
+    const a = t / NT * Math.PI * 2, rr = row[t % NT];
+    pos.push(c.x + Math.sin(a) * rr, y, c.z + Math.cos(a) * rr); uv.push(t / NT * 2, (y - y0) / (y1 - y0));  // two pattern repeats round the body
+  } });
+  for (let iy = 0; iy < R - 1; iy++) for (let t = 0; t < NT; t++) { const a = iy * (NT + 1) + t, d = a + NT + 1; idx.push(a, a + 1, d, d, a + 1, d + 1); }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3)); geo.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+  geo.setIndex(idx); geo.computeVertexNormals();
+  return geo;
+}
+function dressKevinFly(fly) {
+  const { n, g } = fly, W = g.matrixWorld, off = g.position, local = b => b.translate(off.clone().negate());
+  const headBox = local(meshBox([n['head-body'], n['head-red']])), hc = headBox.getCenter(V(0, 0, 0)), hs = headBox.getSize(V(0, 0, 0)).multiplyScalar(.5);
+  const eyes = [1, -1].map(s => local(meshBox([n['head-red']], new THREE.Box3(), v => (v.x - off.x - hc.x) * s > 0)));  // the fly's left eye is on +X
+  const tbox = local(meshBox([n['thorax-body']]));
+  const head = anchorAt(n.head, W, hc);  // head frame: origin at the head center, fly axes, stage units
+
+  // --- hair cards: centre part, volume on the sides, falling behind the eyes to the shoulders ---
+  const hair = new THREE.Group(), clumps = [], geos = Array.from({ length: 6 }, () => []);
+  const root = new THREE.Color('#24170e'), tip = new THREE.Color('#5e3e25'), tmp = new THREE.Color();  // dark brown shag, slightly warmer ends
+  const ex = Math.max(eyes[0].max.x, -eyes[1].min.x) - hc.x;  // half width over the eyes
+  // lens surface of the sunglasses (built below): an ellipse around (0, ec.y, ec.z), from angle T0 at the nose to T1 at the temple
+  const eb = eyes[0].clone().union(eyes[1]), ec = eb.getCenter(V(0, 0, 0)).sub(hc), eh = eb.getSize(V(0, 0, 0)).multiplyScalar(.5);
+  const ax = ex * 1.12, az = eb.max.z - hc.z - ec.z + hs.z * .4, hh = eh.y * 1.05;
+  const T0 = Math.asin(Math.min(.9, (eyes[0].min.x - hc.x) / ax)), T1 = 1.95;
+  const keepOffGlasses = p => {  // at lens height the hair passes behind the lens edge and outside its surface, never through it
+    const band = (p.y - ec.y) / (hh * 1.45);
+    if (Math.abs(band) >= 1) return p;
+    const k = (1 - band * band) ** 2, u = p.x / ax, w = (p.z - ec.z) / az;
+    const r = Math.hypot(u, w), th = Math.atan2(Math.abs(u), w);
+    if (th > T1 + .45) return p;  // well behind the temples: free
+    const th2 = th + (Math.max(th, T1 + .12) - th) * k, r2 = r + (Math.max(r, 1.22) - r) * k, s = p.x < 0 ? -1 : 1;
+    return p.set(s * Math.sin(th2) * r2 * ax, p.y, ec.z + Math.cos(th2) * r2 * az);
+  };
+  const drop = hs.y * 1.55;  // shag: from the temples down to the jaw / neck, not the shoulders
+  let seed = 11; const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+  const strand = (s, phi, R, L, ph, amp, top = phi) => {  // top != phi: swept from the front of the parting round to the side
+    const X = ex * R, Y = hs.y * 1.1, Z = hs.z * R, P = (a, r, y) => V(s * Math.sin(a) * X * r, y, Math.cos(a) * Z * r);
+    const pts = [V(s * .015, Y, Math.cos(top) * Z * .75), P(top, .6, Y * .93), P((top + phi) / 2, .97, Y * (top < phi ? .72 : .45)), P(phi, 1, 0)];
+    for (let j = 1; j <= 5; j++) {
+      const a = phi + amp * Math.cos(j * 1.1 + ph), rr = 1 + .05 * j + amp * 2 * Math.sin(j * 1.3 + ph) + .24 * (j / 5) ** 2;  // ends flick outwards
+      pts.push(V(s * Math.sin(a) * X * rr, -j * L / 5, Math.cos(a) * Z * rr - .02 * j));
+    }
+    return new THREE.CatmullRomCurve3(pts);
+  };
+  const NS = 24;
+  const card = (c, width, dim, sun) => {  // a ribbon of hair along curve c, darker at the root
+    const pos = [], col = [], uv = [], idx = [];
+    for (let j = 0; j <= NS; j++) {
+      const t = j / NS, p = c.getPoint(t), tg = c.getTangent(t), out = V(p.x, 0, p.z).normalize();
+      const side = V(0, 0, 0).crossVectors(tg, out).normalize().multiplyScalar(width * (1 - .35 * t) / 2);
+      pos.push(...keepOffGlasses(p.clone().sub(side)).toArray(), ...keepOffGlasses(p.clone().add(side)).toArray());
+      tmp.copy(root).lerp(tip, THREE.MathUtils.smoothstep(t, .35, 1) * sun).multiplyScalar(dim);
+      col.push(tmp.r, tmp.g, tmp.b, tmp.r, tmp.g, tmp.b); uv.push(0, 1 - t, 1, 1 - t);
+      if (j < NS) idx.push(j * 2, j * 2 + 1, j * 2 + 2, j * 2 + 1, j * 2 + 3, j * 2 + 2);
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3)); geo.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+    geo.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2)); geo.setIndex(idx); geo.computeVertexNormals();
+    return geo;
+  };
+  for (let layer = 0; layer < 4; layer++) for (let i = 0; i < (layer < 3 ? 24 : 14); i++) {
+    const s = i % 2 ? 1 : -1, k = (Math.floor(i / 2) + rnd() * .6) / (layer < 3 ? 12 : 7), sweep = layer === 3;
+    const phi = THREE.MathUtils.degToRad(sweep ? 84 + 20 * k : 60 + 120 * k + layer * 4);  // 0 = face, 180 = nape
+    const top = sweep ? THREE.MathUtils.degToRad(12 + 50 * k) : phi;
+    const R = (sweep ? 1.3 : 1.16 + layer * .08) + rnd() * .04, L = drop * (.75 + rnd() * .45 - layer * .05);  // choppy, uneven layers
+    const c = strand(s, phi, R, L, rnd() * 6.3, .05 + rnd() * .05, top);
+    const geo = card(c, (.22 + rnd() * .08) * (ex + hs.z) * (1 - layer * .1), (.78 + layer * .14) * (.85 + rnd() * .3), .6 + rnd() * .4);
+    geos[(phi < 1.75 ? 0 : phi < 2.5 ? 1 : 2) * 2 + (s > 0 ? 1 : 0)].push(geo);
+  }
+  // shaggy fringe: from the crown forward over the forehead, ending just on the top of the frame
+  const fringeEnd = ec.y + hh * 1.3;
+  for (let i = 0; i < 18; i++) {
+    const a = -.95 + 1.9 * (i + rnd() * .5) / 18, s = a < 0 ? -1 : 1, X = ex, Y = hs.y * 1.1, Z = hs.z;
+    const P = (r, y, da = 0) => V(Math.sin(a + da) * X * r, y, Math.cos(a + da) * Z * r);
+    const c = new THREE.CatmullRomCurve3([P(.3, Y * 1.02), P(.85, Y * .97), P(1.12, (Y + fringeEnd) / 2, a * .08),
+      P(1.2, fringeEnd + rnd() * hh * .25, a * .18 + (rnd() - .5) * .1)]);
+    geos[s > 0 ? 1 : 0].push(card(c, (.16 + rnd() * .06) * (ex + hs.z), .9 + rnd() * .2, .5 + rnd() * .3));
+  }
+  const hairMat = new THREE.MeshStandardMaterial({ vertexColors: true, map: strandTex, alphaTest: .35, side: THREE.DoubleSide, roughness: .5, emissive: 0x1a0e05 });
+  geos.forEach((list, c) => {
+    const m = new THREE.Mesh(mergeGeometries(list), hairMat);
+    m.userData = { side: c % 2 ? 1 : -1, phase: c * 1.3, weight: 1 + Math.floor(c / 2) * .3 };
+    hair.add(m); clumps.push(m);
+  });
+  const capEnd = Math.min(1.25, Math.acos(THREE.MathUtils.clamp((ec.y + hh * 1.25) / (hs.y * 1.08), -1, 1)));  // stops above the frame
+  const cap = new THREE.Mesh(new THREE.SphereGeometry(1, 32, 16, 0, Math.PI * 2, 0, capEnd), new THREE.MeshStandardMaterial({ color: 0x24170e, roughness: .7 }));
+  cap.scale.set(ex * 1.06, hs.y * 1.08, hs.z * 1.08); cap.position.z = -hs.z * .1; hair.add(cap);
+  head.add(hair); fly.hair = { group: hair, clumps };
+
+  // --- ivory wraparound sunglasses, dark lenses with a yellow-olive sheen, over the red eyes ---
+  const frame = new THREE.MeshPhysicalMaterial({ color: 0xcfc4a4, roughness: .4, clearcoat: .6, clearcoatRoughness: .25 });  // ivory, not white: bloom picks up near-white
+  const lens = new THREE.MeshPhysicalMaterial({ color: 0x3d3814, metalness: .55, roughness: .06, clearcoat: 1, iridescence: .35,
+    iridescenceIOR: 1.8, iridescenceThicknessRange: [200, 600] });
+  shiny.push(frame, lens);
+  const lensPt = (s, th, yn) => {  // yn in [-1, 1] across the lens height; th from the nose round to the temple
+    const f = Math.sqrt(1 - (.45 * yn) ** 2), shape = 1 - .3 * ((th - 1) / 1) ** 2;
+    return V(s * Math.sin(th) * ax * f, ec.y + yn * hh * shape, ec.z + Math.cos(th) * az * f);
+  };
+  for (const s of [1, -1]) {
+    const NU = 28, NV = 8, pos = [], idx = [];
+    for (let u = 0; u <= NU; u++) for (let v = 0; v <= NV; v++) pos.push(...lensPt(s, T0 + (T1 - T0) * u / NU, v / NV * 2 - 1).toArray());
+    for (let u = 0; u < NU; u++) for (let v = 0; v < NV; v++) { const a = u * (NV + 1) + v, b = a + NV + 1; idx.push(...(s > 0 ? [a, b, a + 1, b, b + 1, a + 1] : [a, a + 1, b, b, a + 1, b + 1])); }
+    const geo = new THREE.BufferGeometry(); geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3)); geo.setIndex(idx); geo.computeVertexNormals();
+    const lm = new THREE.Mesh(geo, lens); lm.userData.noShadow = true; head.add(lm);
+    const rim = [];  // frame all round the lens, then the temple arm back into the hair
+    for (let u = 0; u <= 16; u++) rim.push(lensPt(s, T0 + (T1 - T0) * u / 16, 1.05));
+    for (let u = 16; u >= 0; u--) rim.push(lensPt(s, T0 + (T1 - T0) * u / 16, -1.05));
+    const rimR = hh * .1;  // chunky frame
+    head.add(new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(rim, true), 80, rimR, 8, true), frame));
+    const end = lensPt(s, T1, .3);
+    head.add(new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3([end, end.clone().add(V(s * .01, 0, -hs.z * .6)), V(s * ax * .9, ec.y, -hs.z * 1.05)]), 16, rimR * .8, 6), frame));
+  }
+  const a = lensPt(1, T0, .7), b = lensPt(-1, T0, .7);  // bridge over the face
+  head.add(new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3([a, V(0, a.y + hh * .1, a.z + hh * .08), b]), 12, hh * .1, 8), frame));
+
+  // --- cream mohair Fair-Isle sweater: a smooth shell shrink-wrapped round thorax + upper abdomen, sleeves on the front legs ---
+  const torso = [n['thorax-body'], n['abdomen-body'], n['abdomen-lower'], n['abdomen_2-body'], n['abdomen_2-lower']].filter(Boolean);
+  const pts = torso.flatMap(m => { const p = m.geometry.attributes.position, o = []; for (let i = 0; i < p.count; i += 2) o.push(V(0, 0, 0).fromBufferAttribute(p, i).applyMatrix4(m.matrixWorld).sub(off)); return o; });
+  const knit = fairIsle([[.16, .36], [.46, .6], [.84, .98]]);  // canvas rows from the top: yoke, chest and hem bands
+  knit.wrapS = THREE.RepeatWrapping;
+  const wool = new THREE.MeshPhysicalMaterial({ color: 0xffffff, map: knit, bumpMap: speckle, bumpScale: .4, roughness: .95, sheen: .8, sheenRoughness: .8, sheenColor: 0xffffff });
+  const sweater = new THREE.Mesh(wrapGeo(pts, .13), wool);  // oversized
+  fly.body.add(sweater);
+  const fuzz = new THREE.Mesh(wrapGeo(pts, .17), new THREE.MeshStandardMaterial({ color: 0xf6f3ec, alphaMap: speckle, transparent: true,
+    opacity: .28, depthWrite: false, roughness: 1 }));  // mohair halo of loose fibres round the knit (light, or the pattern greys out)
+  fuzz.userData.noShadow = true;
+  fly.body.add(fuzz);
+  n['thorax-black'].visible = n['head-black'].visible = n['antenna_left-black'].visible = n['antenna_right-black'].visible = false;  // bristles under the wool / poking through the lenses
+  const cuffTex = fairIsle([[0, 1]]); cuffTex.wrapS = THREE.RepeatWrapping;
+  const cuff = new THREE.MeshPhysicalMaterial({ map: cuffTex, bumpMap: speckle, bumpScale: .8, roughness: .95, sheen: 1, sheenRoughness: .7, sheenColor: 0xfff1dc });
+  for (const sd of ['left', 'right']) {  // sleeves down the front legs, patterned cuff on the femur
+    const fb = local(meshBox([n[`femur_T1_${sd}-body`]])), fy0 = fb.min.y, fy1 = fb.max.y, fm = n[`femur_T1_${sd}-body`];
+    const fc = fb.getCenter(V(0, 0, 0));
+    fm.add(new THREE.Mesh(shell(fm, .035, W, p => [Math.atan2(p.x - fc.x, p.z - fc.z) / Math.PI + 1, (p.y - fy0) / (fy1 - fy0)]), cuff));
+  }
+
+  // --- layered necklaces on the chest: a thin gold chain and three strands of wooden / olive / dark beads ---
+  const sp = sweater.geometry.attributes.position, wp = Array.from({ length: sp.count }, (_, i) => V(0, 0, 0).fromBufferAttribute(sp, i));
+  const front = (x, y) => wp.reduce((z, p) => Math.abs(p.x - x) < .08 && Math.abs(p.y - y) < .08 ? Math.max(z, p.z) : z, -9);
+  const neckY = Math.min(tbox.max.y, hc.y - hs.y * .7), w = (tbox.max.x - tbox.min.x) * .28;
+  const necklace = dropY => new THREE.CatmullRomCurve3([-1, -.6, -.3, 0, .3, .6, 1].map(t => {
+    const x = t * w, y = neckY - dropY * (1 - t * t) - .02;
+    return V(x, y, Math.max(front(x, y), -8) + .07);  // on top of the mohair halo
+  }));
+  const gold = std(0xe0b050, { metalness: 1, roughness: .25 });
+  shiny.push(gold);
+  fly.body.add(new THREE.Mesh(new THREE.TubeGeometry(necklace(.3), 48, .007, 5), gold));
+  const beads = [], C = c => new THREE.Color(c);
+  const strands = [  // [drop, bead count, radius, colors]: a short dark choker-ish one, a wooden one, a long olive/wood one
+    [.1, 34, .016, [C('#2e241c'), C('#5a4630')]],
+    [.24, 30, .024, [C('#8a5a32'), C('#6e4526'), C('#a0703e')]],
+    [.42, 36, .022, [C('#6b7a3a'), C('#8a5a32'), C('#58662e'), C('#e2d6b8')]],
+  ];
+  for (const [drop, count, r, palette] of strands) {
+    const curve = necklace(drop);
+    for (let i = 0; i <= count; i++) {
+      const bd = new THREE.SphereGeometry(r, 8, 6).translate(...curve.getPoint(i / count).toArray()), c = palette[i % palette.length];
+      bd.setAttribute('color', new THREE.Float32BufferAttribute(Array(bd.attributes.position.count).fill(0).flatMap(() => [c.r, c.g, c.b]), 3));
+      beads.push(bd);
+    }
+  }
+  fly.body.add(new THREE.Mesh(mergeGeometries(beads), std(0xffffff, { vertexColors: true, roughness: .45 })));
 }
 
 // ---------- instruments ----------
-const glow = color => std(color, { roughness: .3, metalness: .4, emissive: new THREE.Color(color), emissiveIntensity: 0 });
+const glow =color => std(color, { roughness: .3, metalness: .4, emissive: new THREE.Color(color), emissiveIntensity: 0 });
 const metal = std(0x9a9aa8, { metalness: .9, roughness: .25 });
 const GUITAR_OUTLINE = [[0, -.46], [.17, -.44], [.27, -.34], [.29, -.2], [.24, -.07], [.21, .02], [.25, .13], [.27, .25], [.22, .33],
   [.15, .3], [.11, .2], [.07, .15], [-.07, .15], [-.11, .19], [-.17, .24], [-.21, .21], [-.22, .1], [-.2, .01], [-.25, -.1],
@@ -548,7 +950,22 @@ export function createStage(parent) {
   }
 
   const env = new THREE.PMREMGenerator(renderer).fromScene(new RoomEnvironment(), .04).texture;  // reflections for lenses and plastic
-  for (const m of shiny) { m.envMap = env; m.envMapIntensity = m.metalness ? .6 : .3; }
+  const shine = () => { for (const m of shiny) { m.envMap = env; m.envMapIntensity = m.metalness ? .6 : .3; } };
+  shine();
+
+  // the flybody model replaces the procedural flies once loaded (no /fly.glb = they stay)
+  new GLTFLoader().load('/fly.glb', gltf => {
+    const proto = gltf.scene;
+    flyMaterials(proto);
+    for (const m of Object.values(band)) {
+      const old = m.fly, fly = makeFlybody(proto, m.color, m.key, old.g.position);
+      if (m.key === 'vocals') dressKevinFly(fly);
+      fly.g.traverse(o => { if (o.isMesh) o.castShadow = !o.userData.noShadow; });
+      m.root.remove(old.g); m.root.add(fly.g); m.fly = fly;
+    }
+    shine();
+    console.log('stage: flybody flies loaded');
+  }, undefined, err => console.log('stage: no /fly.glb, procedural flies', err?.message || ''));
 
   // ---------- API ----------
   let beat = 0, energy = .3, focused = null;
@@ -598,25 +1015,7 @@ export function createStage(parent) {
     for (const m of Object.values(band)) {
       const { fly, inst } = m;
       m.hit *= Math.exp(-dt * 9);
-      fly.body.position.y = m.hit * .07 + beat * .03;
-      const nod = m.key === 'vocals' ? .26 : .18;
-      fly.head.rotation.x = -.1 + beat * nod + m.hit * .1;
-      fly.head.rotation.z = m.key === 'vocals' ? Math.sin(t * 1.1) * .06 : 0;
-      fly.arms.forEach((a, i) => a.rotation.x = -(i === m.arm ? m.hit : m.hit * .3) * .7);
-      const flap = (14 + 46 * m.act) * t;  // wingbeat = brain activity
-      fly.wings.forEach((w, i) => w.rotation.y = (i ? -1 : 1) * (.25 + .25 * Math.sin(flap)));
-      fly.antMat.emissiveIntensity *= Math.exp(-dt * 10);
-      if (fly.hair) {  // the hair follows the head on a damped spring: lag + bounce
-        const hx = fly.head.rotation.x;
-        fly.hairVel += ((hx - fly.hairLag) * 60 - fly.hairVel * 9) * dt;
-        fly.hairLag += fly.hairVel * dt;
-        const swing = (fly.hairLag - hx) * 1.1;
-        for (const c of fly.hair.clumps) {
-          const { side, phase, weight } = c.userData;
-          c.rotation.x = swing * weight + Math.sin(t * 1.3 + phase) * .025;
-          c.rotation.z = side * (.02 + Math.sin(t * .9 + phase) * .025 + m.hit * .03) - fly.head.rotation.z * .6;
-        }
-      }
+      fly.animate(m, t, dt, beat);
       for (const g of inst.glows) g.emissiveIntensity = m.hit * .7;
       m.spot.intensity = 18 + 40 * m.hit;
       m.cone.material.uniforms.uOpacity.value = (focused && focused !== m.key ? .03 : .07) + m.hit * .12;

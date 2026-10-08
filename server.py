@@ -4,18 +4,21 @@
   uv run server.py --bars 0 132       # another section (bars [from, to)), here the whole song
   uv run server.py --fast 2           # 2 quick rehearsals from the cache before performing live
   uv run server.py --fresh            # forget what was learned (data/readout.pt) and start from scratch
+  uv run server.py --port 8010        # another port
 then open http://localhost:8000
 """
 import argparse
 import asyncio
+import base64
 import contextlib
+import functools
 import json
 import time
 from pathlib import Path
 
 import torch
 import uvicorn
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -26,6 +29,7 @@ ap = argparse.ArgumentParser()
 ap.add_argument("--bars", type=int, nargs=2, default=[0, 8])
 ap.add_argument("--fast", type=int, default=0)
 ap.add_argument("--fresh", action="store_true", help="ignore data/readout.pt and start from scratch")
+ap.add_argument("--port", type=int, default=8000)
 args = ap.parse_args()
 
 song = brain.load_song()
@@ -39,7 +43,12 @@ hello = {"t": "hello", "bpm": song["bpm"], "step_sec": song["step_sec"], "steps"
          "neurons": band.N, "outputs": len(band.feat), "ears": len(band.ear_pos) + len(band.ear_bar),
          "features": brain.BINS * len(band.feat), "learner": "RLS", "song_steps": song["n_steps"],
          "audio": "/audio" if "audio" in song and "times" in song and (brain.DATA / song["audio"]).exists() else None,
-         "parts": {p.name: {"classes": p.classes, "mono": p.mono} for p in band.parts}}
+         "parts": {p.name: {"classes": p.classes, "mono": p.mono} for p in band.parts},
+         # instrument samples cut from the stems (prep.py samples); the stage falls back to synths without them
+         "samples": {part: {c: f"/{path}" for c, path in files.items() if (brain.DATA / path).exists()}
+                     for part, files in song.get("samples", {}).items()} or None,
+         "brain": "/brain.json", "alive": band.N,
+         "fly": "/fly.glb" if (brain.DATA / "fly.glb").exists() else None}
 
 
 async def send(msg):
@@ -51,8 +60,13 @@ async def send(msg):
             clients.discard(ws)
 
 
-def notes(part, idx):
-    return [[part.classes[i], part.dur[i]] for i in idx]
+def notes(part, played):
+    """[(class index, length, velocity)] -> [[class value, length in sixteenths, velocity 0-1]]."""
+    return [[part.classes[c], length, vel] for c, length, vel in played]
+
+
+def b64(array):
+    return base64.b64encode(array.tobytes()).decode()
 
 
 async def end_pass(fast):
@@ -88,6 +102,9 @@ async def rehearse():
             out = band.play(r, s)
             await send({"t": "step", "i": s, "act": r.sum(1).tolist(), "time": song["times"][s] if "times" in song else None,
                         "raster": dict(zip(brain.PARTS, band.spikes(r).int().tolist())),
+                        # spike count of every simulated neuron, per brain: uint8[B * N], brain-major
+                        "spikes": b64(band.last_counts.T.clamp(max=255).to(torch.uint8).cpu().numpy()),
+                        "scores": {p.name: p.top() for p in band.parts},
                         "play": {p.name: notes(p, out[p.name][0]) for p in band.parts},
                         "target": {p.name: notes(p, out[p.name][1]) for p in band.parts}})
             await asyncio.sleep(max(0, t0 + (j + 1) * song["step_sec"] - time.perf_counter()))
@@ -102,6 +119,23 @@ async def lifespan(_):
 
 
 app = FastAPI(lifespan=lifespan)
+
+
+@app.get("/brain.json")
+@functools.cache
+def brain_map():
+    """Neuron positions for the stage map: a brain silhouette and the simulated neurons (in spike order)."""
+    return {"shape": b64(band.shape_pos), "alive": b64(band.alive_pos), "classes": band.alive_class,
+            "n_shape": len(band.shape_pos), "n_alive": band.N}
+
+
+@app.get("/fly.glb")
+async def fly():
+    """The flybody fly model converted by prep.py fly (absent = the stage keeps its procedural flies)."""
+    path = brain.DATA / "fly.glb"
+    if not path.exists():
+        raise HTTPException(404, "run `uv run prep.py fly` to build the flybody model")
+    return FileResponse(path)
 
 
 @app.get("/audio")
@@ -124,7 +158,9 @@ async def ws(sock: WebSocket):
         clients.discard(sock)
 
 
+# mounted after the routes above: "/" is a catch-all
+app.mount("/samples", StaticFiles(directory=brain.DATA / "samples", check_dir=False))
 app.mount("/", StaticFiles(directory=Path(__file__).parent / "web", html=True))
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="127.0.0.1", port=8000)
+    uvicorn.run(app, host="127.0.0.1", port=args.port)
