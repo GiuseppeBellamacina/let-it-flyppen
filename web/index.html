@@ -19,6 +19,7 @@
   <header id="top" class="panel">
     <h1>Let It Flyppen</h1>
     <dl class="facts">
+      <div><dt><label for="song">song</label></dt><dd><select id="song" disabled><option>–</option></select></dd></div>
       <div><dt>rehearsal</dt><dd id="pass">–</dd></div>
       <div><dt>mode</dt><dd id="mode">waiting</dd></div>
       <div><dt>section</dt><dd id="section">–</dd></div>
@@ -73,8 +74,9 @@
     <div id="cards"></div>
     <div id="controls" class="panel">
       <div class="seg" role="group" aria-label="What you hear">
-        <button data-mode="play" class="on" aria-pressed="true">Flies</button>
-        <button data-mode="target" aria-pressed="false" title="The transcribed notes, played by the same synths">Score</button>
+        <button data-mode="play" class="on" aria-pressed="true" title="Correct notes play the real recording of each part, wrong ones a sampled instrument">Flies</button>
+        <button data-mode="sampled" aria-pressed="false" title="The flies' notes on sampled instruments only">Samples</button>
+        <button data-mode="target" aria-pressed="false" title="The transcribed notes, played by the sampled instruments">Score</button>
         <button data-mode="record" aria-pressed="false" title="The real recording, in time with the band">Original</button>
       </div>
       <button id="home" title="Back to the overview (Esc)">Stage</button>
@@ -82,7 +84,7 @@
     </div>
   </aside>
 
-  <p id="hint"><kbd>1</kbd>–<kbd>5</kbd> member · <kbd>O</kbd> flies/score/original · <kbd>H</kbd> interface · <kbd>I</kbd> info · <kbd>Esc</kbd> stage</p>
+  <p id="hint"><kbd>1</kbd>–<kbd>5</kbd> member · <kbd>O</kbd> flies/samples/score/original · <kbd>H</kbd> interface · <kbd>I</kbd> info · <kbd>Esc</kbd> stage</p>
 </div>
 
 <section id="info" class="panel" hidden aria-labelledby="h-info">

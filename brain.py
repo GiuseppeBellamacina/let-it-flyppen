@@ -5,7 +5,8 @@ Johnston's organ auditory neurons, and learns only a linear readout from its out
 to the notes of its own part.
 
   uv run brain.py                     # self-check: speed, neuron response, learning over 8 bars
-  uv run brain.py train [minutes]     # offline training on the whole song, early stopping -> data/readout.pt
+  uv run brain.py train [song] [minutes]   # offline training on a whole song, early stopping
+                                           # -> data/songs/<song>/readout.pt (asks which song if not given)
 """
 import json
 import math
@@ -166,7 +167,7 @@ class Band:
         self.N = len(ann)
         self.M = matrix(edges, self.N, dev=dev)
         self.reset()
-        torch.manual_seed(0)  # same circuit on every start, so data/readout.pt stays valid
+        torch.manual_seed(0)  # same circuit on every start, so a saved readout.pt stays valid
         all_ears = torch.tensor(ears, device=dev)
         fired = sum(self.run(all_ears).sum((0, 2)) for _ in range(PROBE_STEPS)).cpu().numpy()
         alive = np.union1d(np.flatnonzero(fired > 0), ears)
@@ -265,7 +266,7 @@ class Band:
 
 
 def synthetic_song(n_steps=128, seed=0):
-    """Fake song with a density similar to a real one, used while data/song.json doesn't exist yet."""
+    """Fake song with a density similar to a real one, used while no song is prepared yet."""
     rng = np.random.default_rng(seed)
     parts = {"drums": {"classes": ["kick", "snare", "hat"],
                        "events": [[s, c, 1] for s in range(n_steps) for c, k in enumerate([4, 8, 2]) if s % k == (c == 1) * 4]}}
@@ -275,16 +276,27 @@ def synthetic_song(n_steps=128, seed=0):
     return {"bpm": 126.0, "step_sec": 60 / 126 / 4, "n_steps": n_steps, "parts": parts}
 
 
-def load_song(n_steps=None):
-    path = DATA / "song.json"
-    song = json.loads(path.read_text()) if path.exists() else synthetic_song()
+def song_dir(name=None, ask=True):
+    """data/songs/<name>; without a name: ask in the terminal (or the first prepared song when ask=False)."""
+    import prep
+    if name or ask:
+        return prep.pick(name)
+    have = [d for d in prep.songs() if (d / "song.json").exists()]
+    return have[0] if have else None
+
+
+def load_song(d=None, n_steps=None):
+    """The song.json of song directory d (a synthetic song if there is none)."""
+    song = json.loads((d / "song.json").read_text()) if d else synthetic_song()
     if n_steps:
         song["n_steps"] = min(song["n_steps"], n_steps)
     return song
 
 
 def self_check(steps=128, train_passes=3):
-    song = load_song(steps)
+    d = song_dir(ask=False)
+    print(f"self-check on {d.name if d else 'a synthetic song'}")
+    song = load_song(d, steps)
     t = time.time()
     band = Band(song)
     dn = int(band.neurons.super_class.isin(["descending", "motor"]).iloc[band.feat.cpu().numpy()].sum())
@@ -324,13 +336,15 @@ def quality(scores):
     return float(np.mean([v["f1"] - 0.1 * v["vel_mae"] - 0.02 * v["dur_mae"] for v in scores.values()]))
 
 
-def train(minutes=45.0, patience=3, tol=1e-4, p0s=(1.0, 10.0, 0.1)):
-    """Offline training on the whole song, no audio, no real time: rehearse from a cached simulation until the
-    readout stops improving on a fresh simulation (early stopping), for a few RLS regularizations; keep the best."""
+def train(d, minutes=45.0, patience=3, tol=1e-4, p0s=(1.0, 10.0, 0.1)):
+    """Offline training on song directory d, no audio, no real time: rehearse from a cached simulation until the
+    readout stops improving on a fresh simulation (early stopping), for a few RLS regularizations; keep the best.
+    Writes d/readout.pt and d/train-log.json: other songs are untouched."""
     global RLS_P0
     t0 = time.time()
     deadline = t0 + minutes * 60
-    song = load_song()
+    song = load_song(d)
+    print(f"training on {d.name}: {song['n_steps']} sixteenths, up to {minutes:g} min")
     band = Band(song)
     steps = range(song["n_steps"])
     print(f"simulating the whole song twice ({len(steps)} sixteenths): one to learn from, one fresh to check...")
@@ -368,17 +382,20 @@ def train(minutes=45.0, patience=3, tol=1e-4, p0s=(1.0, 10.0, 0.1)):
                 bad += 1
         print(f"P0={p0}: best quality {run_best:.4f} ({'early stop' if bad >= patience else 'time up'} after {n} rehearsals)")
     q, p0, state = best
-    torch.save(state, DATA / "readout.pt")
-    (DATA / "train-log.json").write_text(json.dumps({"best_quality": q, "best_p0": p0, "minutes": round((time.time() - t0) / 60, 1),
-                                                       "log": log}, indent=1))
-    print(f"best: quality {q:.4f} with P0={p0} -> {DATA / 'readout.pt'} (log in train-log.json), "
+    torch.save(state, d / "readout.pt")
+    (d / "train-log.json").write_text(json.dumps({"best_quality": q, "best_p0": p0, "minutes": round((time.time() - t0) / 60, 1),
+                                                    "log": log}, indent=1))
+    print(f"best: quality {q:.4f} with P0={p0} -> {d / 'readout.pt'} (log in train-log.json), "
           f"{(time.time() - t0) / 60:.1f} min")
 
 
 if __name__ == "__main__":
     import sys
     if sys.argv[1:2] == ["train"]:
-        train(float(sys.argv[2]) if len(sys.argv) > 2 else 45.0)
+        args = sys.argv[2:]
+        minutes = next((float(a) for a in args if a.replace(".", "", 1).isdigit()), 45.0)
+        name = next((a for a in args if not a.replace(".", "", 1).isdigit()), None)
+        train(song_dir(name), minutes)
         sys.exit()
     ms, budget, responding, test = self_check()
     assert ms < budget, "simulation slower than real time"

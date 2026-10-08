@@ -51,7 +51,7 @@ export function createBrainMap(el) {
     blending: THREE.AdditiveBlending, uniforms: { uScale: { value: 300 }, uMode: { value: 0 } } });
   const pivot = new THREE.Group(); scene.add(pivot);
 
-  let sel = 'drums', nShape = 0, nAlive = 0, act = null, actAttr = null, classes = [], loading = null, last = 0;
+  let sel = 'drums', nShape = 0, nAlive = 0, act = null, actAttr = null, classes = [], url = null, points = null, loads = 0, last = 0;
 
   // toggles: Live spikes / Cell colors
   const legend = $('.bm-legend');
@@ -68,8 +68,11 @@ export function createBrainMap(el) {
   for (const b of el.querySelectorAll('.bm-seg button')) b.onclick = () => setMode(+b.dataset.view);
   setMode(0);
 
-  async function load(url) {
-    const d = await (await fetch(url)).json();
+  async function load(u) {
+    const r = await fetch(u);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const d = await r.json();
+    if (u !== url) return;  // another song arrived meanwhile
     nShape = d.n_shape; nAlive = d.n_alive; classes = d.classes;
     const n = nShape + nAlive, pos = new Float32Array(n * 3), kind = new Float32Array(n), cls = new Float32Array(n * 3);
     pos.set(new Float32Array(unb64(d.shape).buffer)); pos.set(new Float32Array(unb64(d.alive).buffer), nShape * 3);
@@ -84,7 +87,7 @@ export function createBrainMap(el) {
     actAttr = new THREE.BufferAttribute(new Float32Array(n), 1).setUsage(THREE.DynamicDrawUsage);
     geo.setAttribute('aAct', actAttr);
     act = actAttr.array.subarray(nShape);
-    pivot.add(new THREE.Points(geo, mat));
+    pivot.add(points = new THREE.Points(geo, mat)); loads++;
     $('.bm-n').textContent = `${nAlive.toLocaleString('en')} of 139,255 neurons · FlyWire v783`;
     setMode(mat.uniforms.uMode.value);
   }
@@ -118,7 +121,18 @@ export function createBrainMap(el) {
   requestAnimationFrame(frame);
 
   return {
-    onHello(h) { if (h.brain && !loading) loading = load(h.brain).catch(e => { loading = null; console.warn('brain map:', e); }); },
+    // every hello is a (re)started song: reset the counters; a new url (another song, maybe another number of
+    // simulated neurons) replaces the points
+    onHello(h) {
+      nSpk.textContent = nAct.textContent = '–';
+      bars.innerHTML = '<li class="none">waiting for live rehearsals…</li>';
+      if (!h.brain || h.brain === url) return;
+      url = h.brain; act = null; nAlive = 0;
+      if (points) { pivot.remove(points); points.geometry.dispose(); points = null; }  // the material is shared: kept
+      const u = url;
+      load(u).catch(e => { if (url === u) url = null; console.warn('brain map:', e); });  // null: the next hello retries
+    },
+    info: () => ({ url, nAlive, loads, geometries: renderer.info.memory.geometries }),
     select(k) {
       sel = k;
       el.style.setProperty('--c', MEMBERS[k].color);
@@ -128,6 +142,7 @@ export function createBrainMap(el) {
       readout(msg);
       if (!act || !msg.spikes) return;
       const all = unb64(msg.spikes), off = ORDER.indexOf(sel) * nAlive;
+      if (all.length !== ORDER.length * nAlive) return;  // a step of another song than the map loaded
       let sum = 0, on = 0;
       for (let i = 0; i < nAlive; i++) {
         const c = all[off + i];

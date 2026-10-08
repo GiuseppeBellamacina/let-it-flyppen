@@ -26,6 +26,9 @@ prep = [
     "trimesh",  # prep.py fly: flybody MuJoCo meshes -> data/fly.glb
     "fast-simplification",  # trimesh decimation backend
     "pillow",  # trimesh materials
+    "audio-separator>=0.47.0",
+    "rmvpe-onnx>=0.2.3",
+    "imageio-ffmpeg>=0.6.0",
 ]
 
 [tool.uv]

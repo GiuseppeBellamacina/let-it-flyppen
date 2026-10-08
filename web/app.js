@@ -3,6 +3,7 @@ import { createStage, MEMBERS, ORDER } from './stage.js';
 import { createBrainMap } from './brainmap.js';
 
 const $ = s => document.querySelector(s);
+const esc = s => String(s).replace(/[&<>"]/g, c => `&#${c.charCodeAt(0)};`);
 const pct = x => (x == null || Number.isNaN(x)) ? '–' : `${Math.round(x * 100)}%`;
 const f1of = (tp, fp, fn) => 2 * tp / Math.max(1, 2 * tp + fp + fn);
 const NOTE = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
@@ -18,8 +19,8 @@ const band = Object.fromEntries(ORDER.map(k => [k, {
 
 // ---------- audio ----------
 // master bus: gentle glue compression, then a ceiling so the full band never clips
-const master = new Tone.Volume(0).chain(new Tone.Compressor({ threshold: -18, ratio: 3, attack: .01, release: .2 }),
-  new Tone.Limiter(-1), Tone.getDestination());
+const limiter = new Tone.Limiter(-1).connect(Tone.getDestination());
+const master = new Tone.Volume(0).chain(new Tone.Compressor({ threshold: -18, ratio: 3, attack: .01, release: .2 }), limiter);
 const verb = new Tone.Reverb({ decay: 3.2, wet: .18 }).connect(master);
 const phaser = new Tone.Phaser({ frequency: .25, octaves: 3, baseFrequency: 500, wet: .5 }).connect(verb);
 const chorus = new Tone.Chorus(2, 3, .4).connect(verb).start();
@@ -73,16 +74,19 @@ function loadSamples(samples) {
       } }).connect(MIX[part].out);
   }
 }
-let listen = 'play', stepSec = .12, audioOn = false, lastT = 0;
+let listen = 'play', stepSec = .12, audioOn = false, lastT = 0, anchor = null, lastI = -2;
+const LOOKAHEAD = .12;  // seconds of buffer between a step's arrival and its sound: absorbs network/render jitter
 const freq = m => Tone.Frequency(m, 'midi').toFrequency();
 const gain = v => .3 + .7 * Math.min(1, Math.max(0, v ?? .8));  // velocity 0-1 -> gain, with a floor
-function sound(key, notes, t) {
+// cut: a stem slice starts now, so a held mono note stops
+function sound(key, notes, t, cut = false) {
   if (SAMP[key] && !SAMP[key].ready && !SAMP[key].failed) return;  // samples on their way: a moment of silence, not a burst of synths
   const s = SAMP[key]?.ready ? SAMP[key] : null, mono = s && MONO.has(key), h = held[key];
   // mono: notes are attacked without a scheduled release (Sampler forgets a note once its release is scheduled),
   // and released here when they end or when the next one starts.
   // ponytail: a part muted mid-note rings until its sample ends (<= 1.5 s)
-  if (mono && h && (notes.length || h <= t + stepSec)) { s.releaseAll(Math.max(Tone.now(), notes.length ? Math.min(h, t) : h)); held[key] = null; }
+  const next = notes.length || cut;
+  if (mono && h && (next || h <= t + stepSec)) { s.releaseAll(Math.max(Tone.now(), next ? Math.min(h, t) : h)); held[key] = null; }
   for (const [c, len = 1, vel] of notes) {
     const v = gain(vel), d = Math.max(.05, len * stepSec);
     if (DEBUG) { nTrig++; if (s) nSampled++; }
@@ -95,8 +99,63 @@ function sound(key, notes, t) {
     else if (s) s.triggerAttackRelease(freq(c), d, t, v);
     else SYN[key].triggerAttackRelease(freq(c), d * .95, t, v);
   }
-  if (DEBUG && nTrig >= 200) { console.info(`[audio] triggers: ${nTrig} (sampled ${nSampled})`); nTrig = nSampled = 0; }
+  if (DEBUG && nTrig + nSlices >= 200) { console.info(`[audio] triggers: ${nTrig} (sampled ${nSampled}), stem slices: ${nSlices}`); nTrig = nSampled = nSlices = 0; }
 }
+
+// Stems ("Flies" mode): a CORRECT note plays the real recording of its part (hello.stems, one mono file per part)
+// from that sixteenth on, so a perfect fly sounds like the song itself; wrong notes stay on the samplers above.
+// One voice per part: a new slice fades out the previous one. Stems are the finished mix: they skip the compressor
+// and the effects, only the limiter; one gain for all keeps their relative levels.
+const STEM_GAIN = 1;
+const stemCh = Object.fromEntries(ORDER.map(k => [k, new Tone.Gain(STEM_GAIN).connect(limiter)]));  // per part: mute/solo
+let STEM = {}, stemKey = null, stemGen = 0, voice = {}, nSlices = 0;
+const stats = { slices: {}, wrong: {}, jitter: 0, jitterMax: 0, gaps: 0 };  // #autoplay debug
+function showStems(done, n) {
+  const b = $('.seg [data-mode="play"]');
+  b.classList.toggle('loading', done < n);
+  b.title = done < n ? `Loading the instrument recordings: ${done}/${n} (the samples play meanwhile)`
+    : 'Correct notes play the real recording of each part, wrong ones a sampled instrument';
+}
+function loadStems(stems) {
+  if (!audioOn) return;  // decoded only once someone listens (~50 MB of audio per part)
+  const key = JSON.stringify(stems ?? null);
+  if (key === stemKey) return;  // hello is resent on every reconnect
+  stemKey = key; STEM = {}; stopStems();
+  const gen = ++stemGen, urls = Object.entries(stems ?? {}).filter(([k]) => stemCh[k]);
+  let done = 0;
+  showStems(0, urls.length);
+  for (const [k, url] of urls) fetch(url)
+    .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.arrayBuffer(); })
+    .then(b => Tone.getContext().decodeAudioData(b))
+    .then(buf => { if (gen === stemGen) STEM[k] = buf; })  // until then (or if it fails) the part uses its sampler
+    .catch(e => console.warn(`[audio] ${k} stem failed, keeping the samples`, e))
+    .finally(() => {
+      if (gen !== stemGen) return;
+      showStems(++done, urls.length);
+      if (done === urls.length) console.info(`[audio] stems ready: ${Object.keys(STEM).length}`);
+    });
+}
+function cutVoice(k, t) {  // ~20 ms fade-out of the part's slice, if it is still sounding at t
+  const v = voice[k]; voice[k] = null;
+  if (!v || v.end <= t) return;
+  v.kill.gain.setValueAtTime(1, t); v.kill.gain.linearRampToValueAtTime(0, t + .02);
+  v.src.stop(Math.min(v.end, t + .03));
+}
+function stopStems(t = Tone.now()) { for (const k in voice) cutVoice(k, t); }
+function slice(k, offset, len, t) {
+  cutVoice(k, t);
+  const raw = Tone.getContext().rawContext, end = t + len * stepSec + .08;  // + a short tail
+  const src = raw.createBufferSource(), env = raw.createGain(), kill = raw.createGain();
+  src.buffer = STEM[k];
+  src.connect(env); env.connect(kill); Tone.connect(kill, stemCh[k]);
+  env.gain.setValueAtTime(0, t); env.gain.linearRampToValueAtTime(1, t + .005);  // 5 ms in
+  env.gain.setValueAtTime(1, end - .035); env.gain.linearRampToValueAtTime(0, end);  // 35 ms out
+  src.start(t, offset); src.stop(end);
+  voice[k] = { src, kill, end };
+  if (DEBUG) { nSlices++; stats.slices[k] = (stats.slices[k] ?? 0) + 1; }
+}
+if (DEBUG) window.__brain = () => brainmap.info();
+if (DEBUG) window.__stems = () => ({ ready: Object.keys(STEM), loading: $('.seg [data-mode="play"]').classList.contains('loading'), ...stats });
 const audible = m => ORDER.some(k => band[k].solo) ? m.solo : !m.muted;
 // "Original": the real recording, kept in time with the sixteenth the band is playing (msg.time)
 const rec = new Audio();
@@ -141,6 +200,7 @@ function refreshMix() {
   for (const m of Object.values(band)) {
     m.el.mute.setAttribute('aria-pressed', m.muted); m.el.solo.setAttribute('aria-pressed', m.solo);
     m.el.card.classList.toggle('silent', !audible(m));
+    stemCh[m.key].gain.rampTo(audible(m) ? STEM_GAIN : 0, .03);  // a ringing stem slice goes quiet too
   }
 }
 function select(k, cam, instant = false) {
@@ -300,12 +360,15 @@ function showInfo(h) {
     mapping from outputs to notes${h.learner ? ` (updated with <b>${h.learner}</b>)` : ''}. The fly acts as a reservoir of dynamics;
     the final layer picks the "music".</p>
     <p><b>F1</b> = harmonic mean of precision (P: how many played notes were correct) and recall (R: how many expected notes were played),
-    on the exact sixteenth, ignoring duration. The song is <i>Let It Happen</i> by Tame Impala, <b>${h.bpm}</b> bpm, one sixteenth every
+    on the exact sixteenth, ignoring duration. The song is <i>${esc(h.song?.title ?? '?')}</i>, <b>${h.bpm}</b> bpm, one sixteenth about every
     ${Math.round(h.step_sec * 1000)} ms; the rehearsed section is ${section(h)}.</p>
+    <p>What you hear: <b>Flies</b> = every correct note plays the real recording of that instrument (lyrics included), every wrong
+    note a sampled instrument, missed notes are silent; <b>Samples</b> = the flies' notes on the sampled instruments only;
+    <b>Score</b> = the transcription on the samples; <b>Original</b> = the recording.</p>
     <p>"Quick rehearsals" = fast passes over the same recording already heard (the brain is deterministic, simulating it once is enough);
     "live" = the real simulation, in time with the music, the one you hear.</p>`;
 }
-const section = h => `bars ${h.steps[0] / 16 + 1}–${h.steps[1] / 16}`;
+const section = h => `bars ${Math.floor(h.steps[0] / 16) + 1}–${Math.ceil(h.steps[1] / 16)}`;
 function toggleInfo(open = $('#info').hidden) {
   $('#info').hidden = !open; $('#info-btn').setAttribute('aria-expanded', open);
   if (open) $('#info .close').focus();
@@ -314,24 +377,50 @@ $('#info-btn').onclick = () => toggleInfo();
 $('#info .close').onclick = () => { toggleInfo(false); $('#info-btn').focus(); };
 
 // ---------- server messages ----------
+// every hello starts the song over (a new song, or the same one after a reconnect): all per-song state is reset;
+// samples, stems, recording and brain map reload only if their urls changed
 function onHello(h) {
   meta = h; stepSec = h.step_sec; pass = h.history?.length ?? 0;
+  clearTimeout(switching);
+  const pick = $('#song');
+  pick.replaceChildren(...(h.songs ?? []).map(s => new Option(
+    `${s.title} · ${s.bars} bars${s.trained ? ` · ✓ ${pct(s.quality)}` : ''}`, s.slug)));
+  pick.value = h.song?.slug; pick.disabled = false;
+  pick.title = h.song?.trained ? 'Trained offline: the flies perform (✓ = training quality)' : 'Not trained yet: the flies learn live';
   const recBtn = $('.seg [data-mode="record"]');
   recBtn.disabled = !h.audio;
-  if (h.audio) { if (!rec.src.endsWith(h.audio)) rec.src = h.audio; }
-  else { recBtn.title = 'No recording: the song comes from a MIDI file'; if (listen === 'record') setListen('play'); }
+  if (h.audio) { if (!rec.src.endsWith(h.audio)) rec.src = h.audio; recBtn.title = 'The real recording, in time with the band'; }
+  else { rec.pause(); rec.removeAttribute('src'); recBtn.title = 'No recording: the song comes from a MIDI file'; if (listen === 'record') setListen('play'); }
   for (const k of ORDER) {
     const m = band[k];
-    m.history = (h.history ?? []).map(r => r[k] ?? 0);
+    Object.assign(m, { tp: 0, fp: 0, fn: 0, nPlay: 0, nExp: 0, prec: null, rec: null, roll: [], ras: [], rasMax: 4,
+      history: (h.history ?? []).map(r => r[k] ?? 0) });
+    m.el.meter.style.width = '0%';
     drawSpark(m); showCard(m);
   }
+  range = {}; rasterSeen = false; started = false; setMode('wait');
+  $('#raster-empty').hidden = false; $('#raster-empty').textContent = 'waiting for live rehearsals…';
+  $('#progress').style.width = '0%'; $('#progress').parentElement.setAttribute('aria-valuenow', 0);
+  $('#pos').textContent = '–';
   $('#pass').textContent = pass ? `#${pass}` : '–';
   $('#section').textContent = section(h);
   $('#bpm').textContent = `${h.bpm} bpm`;
-  showInfo(h); drawChart();
+  showInfo(h); drawChart(); drawRaster();
   loadSamples(h.samples);
+  loadStems(h.stems);
   brainmap.onHello(h);
 }
+// song picker: the server answers with status messages ("loading …") and, once the new brains are built, a new hello
+let ws = null, switching = null;
+$('#song').onchange = e => {
+  const pick = e.target;
+  if (ws?.readyState !== WebSocket.OPEN) { pick.value = meta?.song?.slug; return; }
+  ws.send(JSON.stringify({ t: 'song', slug: pick.value }));
+  pick.disabled = true; stopStems(); rec.pause();
+  $('#status').textContent = 'loading the song…';
+  // a song that fails to load never answers: don't stay locked forever
+  switching = setTimeout(() => { pick.disabled = false; pick.value = meta?.song?.slug; }, 90000);
+};
 function onPass(p) {
   pass = p.n; $('#pass').textContent = `#${p.n}${p.fast ? '' : ' ✓'}`;
   if (p.fast) { setMode('fast'); $('#progress').style.width = '100%'; }
@@ -353,9 +442,24 @@ const nk = n => JSON.stringify(n[0]);
 function onStep(msg) {
   if (mode !== 'live') { setMode('live'); if (!started) { started = true; $('#pass').textContent = `#${pass + 1}`; } }  // connected mid-rehearsal: it is the one after those already finished
   tick++; lastStepAt = performance.now();
-  // strictly increasing: steps queued while the page was busy arrive in the same audio quantum, and Tone's synths
-  // throw on two attacks at the same time
-  const t = audioOn ? (lastT = Math.max(Tone.now() + .06, lastT + .005)) : 0;
+  // scheduled on the song's own clock (anchor + msg.time), not on arrival: network/render jitter would otherwise
+  // stutter the stem slices. Re-anchor at a new rehearsal, a skipped step, or when a step arrives too late.
+  // Strictly increasing as well: Tone's synths throw on two attacks at the same time.
+  let t = 0;
+  if (audioOn) {
+    if (msg.time == null) t = Tone.now() + LOOKAHEAD;
+    else {
+      if (anchor == null || msg.i !== lastI + 1 || anchor + msg.time < Tone.now() + .02) anchor = Tone.now() + LOOKAHEAD - msg.time;
+      t = anchor + msg.time;
+    }
+    t = lastT = Math.max(t, lastT + .005);
+  }
+  lastI = msg.i;
+  if (DEBUG && audioOn && stats.prev) {  // scheduling jitter: audio gap between steps vs the song's own gap
+    const j = Math.abs((t - stats.prev[0]) - (msg.time - stats.prev[1]));
+    if (j < 1) { stats.jitter += j; stats.gaps++; stats.jitterMax = Math.max(stats.jitterMax, j); }  // > 1 s: a new rehearsal
+  }
+  if (DEBUG) stats.prev = [t, msg.time];
   if (meta) {
     const [s0, s1] = meta.steps, f = (msg.i - s0 + 1) / Math.max(1, s1 - s0);
     $('#progress').style.width = `${Math.min(100, f * 100)}%`;
@@ -372,8 +476,17 @@ function onStep(msg) {
     m.tp += hit; m.fp += play.length - hit; m.fn += target.length - hit;
     m.nPlay += play.length; m.nExp += target.length;
     m.act = msg.act?.[i] ?? 0; m.actMax = Math.max(m.actMax * .995, m.act, 1e-6);
-    const heard = listen === 'play' ? play : target;
-    if (audioOn && audible(m) && listen !== 'record') sound(k, heard, t);
+    const heard = listen === 'play' || listen === 'sampled' ? play : target;
+    if (audioOn && audible(m) && listen !== 'record') {
+      if (listen === 'play' && STEM[k]) {  // stem mode: correct notes -> one slice of the recording, wrong -> sampler
+        const ok = play.filter(n => tset.has(nk(n))), wrong = play.filter(n => !tset.has(nk(n)));
+        // drums: until the next drum slice, at most 4 sixteenths; others: the longest correct note
+        if (ok.length) slice(k, msg.time, k === 'drums' ? 4 : Math.max(...ok.map(n => n[1] ?? 1)), t);
+        else if (wrong.length && MONO.has(k)) cutVoice(k, t);  // a mono part plays one note at a time
+        if (DEBUG) stats.wrong[k] = (stats.wrong[k] ?? 0) + wrong.length;
+        sound(k, wrong, t, ok.length > 0);  // also with no notes: it releases held mono samples
+      } else sound(k, heard, t);
+    }
     stage.perform(k, heard);
     stage.setActivity(k, m.act / m.actMax);
     levels.push(m.act / m.actMax); played.push(play.length > 0);
@@ -395,7 +508,7 @@ function onStep(msg) {
   drawRaster();
 }
 function connect() {
-  const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`);
+  ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`);
   ws.onopen = () => { $('#status').textContent = 'connected'; };
   ws.onclose = () => { setMode('off'); $('#status').textContent = 'server offline, retrying…'; setTimeout(connect, 2000); };
   ws.onmessage = e => {
@@ -412,6 +525,7 @@ function connect() {
 function setListen(v) {
   listen = v;
   if (v !== 'record') rec.pause();
+  if (v !== 'play') stopStems();
   for (const b of document.querySelectorAll('.seg button')) { b.classList.toggle('on', b.dataset.mode === v); b.setAttribute('aria-pressed', b.dataset.mode === v); }
 }
 for (const b of document.querySelectorAll('.seg button')) b.onclick = () => setListen(b.dataset.mode);
@@ -428,8 +542,8 @@ addEventListener('keydown', e => {
   if (e.ctrlKey || e.metaKey || e.altKey || e.target.closest?.('input, textarea, select')) return;
   const k = e.key.toLowerCase();
   if (k >= '1' && k <= '5') select(ORDER[+k - 1], true);
-  else if (k === 'o') {  // Flies -> Score -> Original (if there is a recording) -> Flies
-    const modes = ['play', 'target', ...(meta?.audio ? ['record'] : [])];
+  else if (k === 'o') {  // Flies -> Samples -> Score -> Original (if there is a recording) -> Flies
+    const modes = ['play', 'sampled', 'target', ...(meta?.audio ? ['record'] : [])];
     setListen(modes[(modes.indexOf(listen) + 1) % modes.length]);
   }
   else if (k === 'h') toggleUI();
@@ -438,7 +552,7 @@ addEventListener('keydown', e => {
   else return;
   e.preventDefault();
 });
-async function enableAudio() { await Tone.start(); audioOn = true; $('#gate')?.remove(); }
+async function enableAudio() { await Tone.start(); audioOn = true; $('#gate')?.remove(); if (meta) loadStems(meta.stems); }
 $('#enter').onclick = enableAudio;
 if (hash.has('autoplay')) enableAudio();  // test hook: same path as the button, no click (needs an autoplay-permitting browser)
 if (hash.has('demo')) $('#gate')?.remove();  // visuals only, no audio (displays, screenshots)

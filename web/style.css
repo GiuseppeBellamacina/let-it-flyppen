@@ -41,6 +41,12 @@ h2 span { color: var(--ink); }
 .facts div { display: flex; align-items: baseline; gap: 7px; }
 .facts dt { color: var(--faint); font-size: 10px; text-transform: uppercase; letter-spacing: .08em; }
 .facts dd { margin: 0; font-weight: 600; font-variant-numeric: tabular-nums; }
+.facts label { cursor: pointer; }
+#song { max-width: 300px; font: 600 12px "JetBrains Mono", monospace; color: var(--ink); background: rgba(255, 255, 255, .06);
+  border: 1px solid var(--line); border-radius: 7px; padding: 1px 4px; text-overflow: ellipsis; cursor: pointer; }
+#song:hover { border-color: rgba(255, 255, 255, .35); }
+#song:disabled { opacity: .55; cursor: progress; }
+#song option { background: #140c22; color: var(--ink); }
 #mode.live { color: #ff4f9a; } #mode.live::before { content: "● "; animation: pulse 1s infinite; }
 #mode.fast { color: #ffd23f; }
 @keyframes pulse { 50% { opacity: .3; } }
@@ -124,8 +130,11 @@ h2 span { color: var(--ink); }
 
 #controls { display: flex; gap: 6px; padding: 6px; align-items: center; }
 .seg { display: flex; gap: 2px; flex: 1; min-width: 0; background: rgba(0, 0, 0, .25); border-radius: 10px; padding: 2px; }
-.seg button { flex: 1; min-width: 0; color: var(--dim); background: transparent; border: 0; border-radius: 8px; padding: 7px 4px; font-size: 12px; }
+.seg button { flex: 1 1 auto; min-width: 0; color: var(--dim); background: transparent; border: 0; border-radius: 8px; padding: 7px 3px;
+  font-size: 11px; white-space: nowrap; }
 .seg button:disabled { opacity: .35; cursor: not-allowed; }
+.seg button.loading::after { content: ""; display: inline-block; width: 5px; height: 5px; margin-left: 4px; vertical-align: middle;
+  border-radius: 50%; background: currentColor; animation: pulse 1s infinite; }  /* stems still decoding */
 .seg button.on { color: #170a12; background: var(--ink); font-weight: 600; }
 #controls > button { flex: none; border: 1px solid var(--line); background: rgba(255, 255, 255, .05); border-radius: 9px; padding: 7px 9px; }
 #controls > button:hover, .tog:hover { border-color: rgba(255, 255, 255, .35); }
@@ -178,4 +187,4 @@ h2 span { color: var(--ink); }
   #roll { height: 160px; } .bm-view { height: 220px; }
   #hint { display: none; }
 }
-@media (prefers-reduced-motion: reduce) { #mode.live::before { animation: none; } }
+@media (prefers-reduced-motion: reduce) { #mode.live::before, .seg button.loading::after { animation: none; } }
