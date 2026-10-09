@@ -11,7 +11,7 @@ Five simulated fruit-fly brains, one per instrument (drums, bass, guitar, synth,
 | **Brain** | The FlyWire v783 connectome (139k neurons, 15M connections) run with the leaky integrate-and-fire model of [Shiu et al. 2024](https://doi.org/10.1038/s41586-024-07763-9) on the GPU. Each fly has its own copy. At startup a probe finds the sub-circuit the input can actually drive (~1,700 neurons); the rest stays below threshold and never affects anything, so only that part is simulated. It runs in real time: ~70 ms of compute per sixteenth note, which lasts 120 ms. |
 | **Ears** | The 1,055 Johnston's organ neurons of the antenna. Every sixteenth note they receive a spike code for the position in the song (beat within the bar + which bar). Each rehearsal the fly hears the same recording, so it gets the same input spikes. |
 | **What learns** | The connectome is **frozen**: synapses never change. Only a linear readout learns, mapping the brain's 616 output neurons (spike counts in 4 time windows per sixteenth) to the notes, plus how loud and how long each note is. It is fitted online with recursive least squares (RLS): rehearsal 1 is chaos, rehearsal 2 is clean. |
-| **Notes** | Extracted from the audio. The instruments are separated with [Demucs](https://github.com/facebookresearch/demucs) (`htdemucs_ft`, `htdemucs_6s`); the vocals with [BS-RoFormer](https://arxiv.org/abs/2309.02612), about 3 dB cleaner. The pitched parts are transcribed with [basic-pitch](https://github.com/spotify/basic-pitch), and the mono lines also with pYIN and [RMVPE](https://arxiv.org/abs/2306.15412). For every 16-bar section of every part, the transcription closest to its stem wins (chroma similarity). Drums are split into kick/snare/hi-hat by frequency band. You can also feed a multitrack MIDI file instead. |
+| **Notes** | Extracted from the audio. The instruments are separated with [Demucs](https://github.com/facebookresearch/demucs) (`htdemucs_ft`, `htdemucs_6s`); the vocals with [BS-RoFormer](https://arxiv.org/abs/2309.02612), about 3 dB cleaner. The guitarist gets a *lead* stem: the mix minus all the other stems, that is demucs's guitar plus whatever the separation leaves out. On *Let It Happen* demucs finds no guitar at all, and this is where the final solo ends up. The played stems sum exactly to the mix. The pitched parts are transcribed with [basic-pitch](https://github.com/spotify/basic-pitch), and the mono lines also with pYIN and [RMVPE](https://arxiv.org/abs/2306.15412). For every 16-bar section of every part, the transcription closest to its stem wins (chroma similarity). Drums are split into kick/snare/hi-hat by frequency band. You can also feed a multitrack MIDI file instead. |
 | **Sound** | Stem mode: when a fly plays the right note at the right sixteenth, you hear **its own stem** at that point of the recording (lyrics included); a wrong note is played with a sample cut from the stem, so mistakes stay audible. The brains decide which notes, when, how loud and how long. |
 
 Measured on *Let It Happen* (2,124 sixteenths, 132 bars, 125 bpm) after offline training (`brain.py train`, early stopping after 27 minutes):
@@ -22,7 +22,7 @@ Measured on *Let It Happen* (2,124 sixteenths, 132 bars, 125 bpm) after offline 
 | velocity error (0–1) | ±0.038 | ±0.045 | ±0.033 | ±0.044 | ±0.044 |
 | length error (sixteenths) | – | ±0.16 | – | – | ±0.13 |
 
-The brains reproduce the transcription exactly. What limits how faithful the band sounds is the transcription itself: `uv run prep.py score` shows how close each part is to its stem (chroma similarity 0–1). Here: bass 0.83, synth 0.80, vocals 0.58 and guitar 0.19, since the guitar is silent for most of the song. The vocals are weakest in bars 81–112 (0.39–0.43).
+The brains reproduce the transcription exactly. What limits how faithful the band sounds is the transcription itself: `uv run prep.py score` shows how close each part is to its stem (chroma similarity 0–1). Here: bass 0.83, synth 0.80, vocals 0.58 and guitar (lead stem) 0.40. The vocals are weakest in bars 81–112 (0.39–0.43), the guitar solo in bars 97–128 (0.32–0.37).
 
 ## Setup
 
@@ -44,6 +44,7 @@ Each song lives in its own folder, `data/songs/<name>/`: source file, stems, tra
 ```bash
 uv run prep.py song path/to/let-it-happen.mp3        # add a song (the name comes from the file, or pass one)
 uv run prep.py song path/to/other.mp3 my-name        # another one
+uv run prep.py song                                  # or drop audio files into data/songs/ and run this
 uv run prep.py list                                  # every song: prepared? trained? quality
 uv run brain.py train                                # asks which song, trains it (early stopping, max 45 min)
 uv run brain.py train let-it-happen 45               # or name it (a unique prefix is enough)
@@ -52,7 +53,7 @@ uv run brain.py train let-it-happen 45               # or name it (a unique pref
 Preparing a song (~10 minutes on a GPU, the first time also downloads the models):
 
 1. **Stems**: demucs for drums, bass, guitar, keys and other, and BS-RoFormer for the vocals.
-2. **Tempo**: beat tracking, smoothed with a running straight-line fit, so the sixteenths follow the song's real tempo.
+2. **Tempo**: beat tracking, smoothed with a running straight-line fit, so the sixteenths follow the song's real tempo. Above 140 bpm the tracker has usually locked onto eighth notes (e.g. 152 instead of 76), so the tempo is halved. Add `--keep-bpm` for a song that really is that fast.
 3. **Notes**: candidates from basic-pitch, plus pYIN and RMVPE for the mono lines. For every 16-bar section of every part, the candidate closest to the stem wins.
 4. **Samples**: instrument samples cut from the stems.
 5. **Web audio**: compressed stems and mix for the stage.

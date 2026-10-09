@@ -336,7 +336,7 @@ def quality(scores):
     return float(np.mean([v["f1"] - 0.1 * v["vel_mae"] - 0.02 * v["dur_mae"] for v in scores.values()]))
 
 
-def train(d, minutes=45.0, patience=3, tol=1e-4, p0s=(1.0, 10.0, 0.1)):
+def train(d, minutes=45.0, patience=3, tol=1e-4, p0s=(10.0, 1.0, 0.1)):  # 10 has won every time so far: tried first
     """Offline training on song directory d, no audio, no real time: rehearse from a cached simulation until the
     readout stops improving on a fresh simulation (early stopping), for a few RLS regularizations; keep the best.
     Writes d/readout.pt and d/train-log.json: other songs are untouched."""

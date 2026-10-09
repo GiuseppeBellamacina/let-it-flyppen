@@ -45,7 +45,7 @@ const SYN = {
 // (synth plays ~8x the notes, in chords: lowest, behind the phaser; vocals upfront).
 const MIX = {
   drums: { vol: -3, out: master, release: .08 },
-  bass: { vol: -3, out: master, release: .2 },
+  bass: { vol: 0, out: master, release: .2 },  // +3 dB: the bass got lost on small speakers
   guitar: { vol: -6, out: chorus, release: .5 },
   synth: { vol: -15, out: phaser, release: .6 },
   vocals: { vol: 3, out: verb, release: .4 },
@@ -104,10 +104,12 @@ function sound(key, notes, t, cut = false) {
 
 // Stems ("Flies" mode): a CORRECT note plays the real recording of its part (hello.stems, one mono file per part)
 // from that sixteenth on, so a perfect fly sounds like the song itself; wrong notes stay on the samplers above.
-// One voice per part: a new slice fades out the previous one. Stems are the finished mix: they skip the compressor
-// and the effects, only the limiter; one gain for all keeps their relative levels.
-const STEM_GAIN = 1;
-const stemCh = Object.fromEntries(ORDER.map(k => [k, new Tone.Gain(STEM_GAIN).connect(limiter)]));  // per part: mute/solo
+// One voice per part: a new slice fades out the previous one, unless it just continues the recording that is already
+// playing (legato), then the running slice is extended. Stems are the finished mix: they skip the compressor and the
+// effects, only the limiter, at their own relative levels, the bass a little louder (+3 dB, it got lost on laptops).
+const STEM_GAIN = { bass: 1.41 };
+const stemGain = k => STEM_GAIN[k] ?? 1;
+const stemCh = Object.fromEntries(ORDER.map(k => [k, new Tone.Gain(stemGain(k)).connect(limiter)]));  // per part: mute/solo
 let STEM = {}, stemKey = null, stemGen = 0, voice = {}, nSlices = 0;
 const stats = { slices: {}, wrong: {}, jitter: 0, jitterMax: 0, gaps: 0 };  // #autoplay debug
 function showStems(done, n) {
@@ -143,15 +145,24 @@ function cutVoice(k, t) {  // ~20 ms fade-out of the part's slice, if it is stil
 }
 function stopStems(t = Tone.now()) { for (const k in voice) cutVoice(k, t); }
 function slice(k, offset, len, t) {
+  const v = voice[k], end = t + len * stepSec + .08;  // + a short tail
+  // legato: the running slice is already at this point of the recording -> keep it playing, just move its end
+  if (v && v.end - .04 > t && Math.abs(v.offset + (t - v.t0) - offset) < .03) {
+    v.env.gain.cancelScheduledValues(t); v.env.gain.setValueAtTime(1, t);
+    v.env.gain.setValueAtTime(1, end - .035); v.env.gain.linearRampToValueAtTime(0, end);
+    v.src.stop(end); v.end = end;
+    if (DEBUG) stats.joined = (stats.joined ?? 0) + 1;
+    return;
+  }
   cutVoice(k, t);
-  const raw = Tone.getContext().rawContext, end = t + len * stepSec + .08;  // + a short tail
+  const raw = Tone.getContext().rawContext;
   const src = raw.createBufferSource(), env = raw.createGain(), kill = raw.createGain();
   src.buffer = STEM[k];
   src.connect(env); env.connect(kill); Tone.connect(kill, stemCh[k]);
   env.gain.setValueAtTime(0, t); env.gain.linearRampToValueAtTime(1, t + .005);  // 5 ms in
   env.gain.setValueAtTime(1, end - .035); env.gain.linearRampToValueAtTime(0, end);  // 35 ms out
   src.start(t, offset); src.stop(end);
-  voice[k] = { src, kill, end };
+  voice[k] = { src, env, kill, end, t0: t, offset };
   if (DEBUG) { nSlices++; stats.slices[k] = (stats.slices[k] ?? 0) + 1; }
 }
 if (DEBUG) window.__brain = () => brainmap.info();
@@ -200,7 +211,7 @@ function refreshMix() {
   for (const m of Object.values(band)) {
     m.el.mute.setAttribute('aria-pressed', m.muted); m.el.solo.setAttribute('aria-pressed', m.solo);
     m.el.card.classList.toggle('silent', !audible(m));
-    stemCh[m.key].gain.rampTo(audible(m) ? STEM_GAIN : 0, .03);  // a ringing stem slice goes quiet too
+    stemCh[m.key].gain.rampTo(audible(m) ? stemGain(m.key) : 0, .03);  // a ringing stem slice goes quiet too
   }
 }
 function select(k, cam, instant = false) {

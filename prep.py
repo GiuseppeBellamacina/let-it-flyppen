@@ -4,8 +4,10 @@ band learned), so songs never overwrite each other; the connectome and the fly m
   uv run prep.py fetch                     # FlyWire v783 connectome + annotations
   uv run prep.py fly                       # flybody fly model -> data/fly.glb
   uv run prep.py song path/to/song.mp3 [name]   # new song: stems -> notes -> samples, in data/songs/<name>/
+                                                # (add --keep-bpm if a song really is faster than 140 bpm)
   uv run prep.py song path/to/song.mid [name]   # or from a multitrack MIDI (cleaner targets)
   uv run prep.py song [name]               # redo an existing song from its cached stems (new transcription)
+  uv run prep.py song                      # prepare the audio files dropped straight into data/songs/
   uv run prep.py list                      # the songs, prepared / trained
   uv run prep.py check [name]              # are the stems complete and consistent with the mix
   uv run prep.py score [name]              # how close each transcribed part is to its stem, per 16-bar section
@@ -37,11 +39,13 @@ MIN_NOTES = 50  # below this threshold a stem is considered empty/bleed
 DEMUCS = {"drums": "htdemucs_ft", "bass": "htdemucs_ft",  # ft: better separation
           "guitar": "htdemucs_6s", "piano": "htdemucs_6s", "other": "htdemucs_6s"}  # 6s: the only one with guitar/piano
 ROFORMER = "model_bs_roformer_ep_317_sdr_12.9755.ckpt"  # vocals: ~3 dB SDR better than demucs (Mel/BS-RoFormer papers)
-STEMS = [*DEMUCS, "vocals"]
+STEMS = [*DEMUCS, "vocals", "lead"]
+PLAYED = ["drums", "bass", "piano", "other", "vocals", "lead"]  # the stems the band plays: they sum exactly to the mix
 # basic-pitch per stem: instrument range (Hz) and higher thresholds to cut bleed from the other stems
 PITCH = {"bass": dict(minimum_frequency=30, maximum_frequency=400, onset_threshold=0.6),
          "vocals": dict(minimum_frequency=80, maximum_frequency=1100, onset_threshold=0.6, frame_threshold=0.4),
          "guitar": dict(minimum_frequency=70, maximum_frequency=1500, onset_threshold=0.5, frame_threshold=0.3),
+         "lead": dict(minimum_frequency=70, maximum_frequency=1500, onset_threshold=0.5, frame_threshold=0.3),
          "piano": dict(minimum_frequency=60, maximum_frequency=3000, onset_threshold=0.5, frame_threshold=0.3),
          "other": dict(minimum_frequency=60, maximum_frequency=3000, onset_threshold=0.5, frame_threshold=0.3)}
 # (thresholds picked by `score`: synth 0.744 -> 0.801 with these + MAX_POLY 4; vocals 0.496 -> 0.534 with pYIN)
@@ -53,7 +57,10 @@ DRUM_SAMPLE_LEN = {"kick": 0.45, "snare": 0.35, "hat": 0.12}
 MONO_MIN_SEC = 0.07  # f0 notes shorter than this are glitches
 BEAT_HOP = 256  # beat tracking resolution: 11.6 ms at 22050 Hz (512 gave 23 ms steps -> sixteenths jumping 116/122/128 ms)
 BEAT_SMOOTH = 8  # beats on each side of the local straight-line fit that removes the remaining jitter
-PART_STEM = {"bass": "bass", "guitar": "guitar", "synth": "other", "vocals": "vocals"}  # stem each pitched part is scored against
+MAX_BPM = 140  # above this the tracker has most likely locked onto eighth notes: halve (prep.py song ... --keep-bpm to keep)
+KEEP_BPM = False
+SOURCES = {".mp3", ".wav", ".flac", ".ogg", ".m4a", ".mid", ".midi"}  # what `song` accepts
+PART_STEM = {"bass": "bass", "guitar": "lead", "synth": "other", "vocals": "vocals"}  # stem each pitched part is scored against
 
 
 # ---------- songs ----------
@@ -69,9 +76,9 @@ def songs():
 def status(d):
     """One line about a song: prepared? trained? how well?"""
     s = d / "song.json"
-    if not s.exists():
+    song = json.loads(s.read_text()) if s.exists() else {}
+    if "n_steps" not in song:
         return "not prepared"
-    song = json.loads(s.read_text())
     out = f"{song['bpm']} bpm, {song['n_steps'] // 16} bars"
     log = d / "train-log.json"
     if (d / "readout.pt").exists():
@@ -111,7 +118,9 @@ def use(d):
 def list_songs():
     for d in songs():
         print(f"  {d.name:30s} {status(d)}")
-    if not songs():
+    for f in loose():
+        print(f"  {f.name:30s} new file, not prepared yet: uv run prep.py song")
+    if not songs() and not loose():
         print("  no songs yet: uv run prep.py song path/to/song.mp3")
 
 
@@ -257,6 +266,14 @@ def separate(path):
     if not (out / "vocals.roformer").exists():  # the marker: older songs have demucs vocals here
         roformer_vocals(out / "mix.wav", out / "vocals.wav")
         (out / "vocals.roformer").touch()
+        (out / "lead.wav").unlink(missing_ok=True)
+    if not (out / "lead.wav").exists():
+        # lead = the mix minus every other stem: demucs's guitar plus whatever the separation lost. On Let It Happen
+        # demucs finds no guitar at all (-80 dB) and the final solo ends up in nobody's stem (residual -11 dB vs mix
+        # in bars 97-128): this gives it back to the guitarist, and the played stems now sum exactly to the mix.
+        mix, sr = sf.read(out / "mix.wav")
+        rest = sum(sf.read(out / f"{n}.wav")[0] for n in PLAYED if n != "lead")
+        sf.write(out / "lead.wav", mix - rest, sr)
     check()
     return out
 
@@ -272,13 +289,14 @@ def check():
     for name in STEMS:
         y, s = sf.read(out / f"{name}.wav")
         assert s == sr and y.shape == mix.shape, f"{name}: length/format differs from the mix"
-        total += y
+        if name in PLAYED:
+            total += y
         m = y.mean(1)[: len(y) // sr * sr].reshape(-1, sr)
         silent = int((20 * np.log10(np.sqrt((m ** 2).mean(1)) + 1e-9) < -50).sum())
         print(f"{name:7s} {len(y) / s:6.1f}s {20 * np.log10(np.sqrt((y ** 2).mean()) + 1e-9):6.1f}dB "
               f"{silent:4d}/{len(m)}s")
     res = 20 * np.log10(np.sqrt(((mix - total) ** 2).mean()) / np.sqrt((mix ** 2).mean()))
-    print(f"residual mix - stem sum: {res:.1f} dB (rough: the stems come from three models, they don't sum exactly to the mix)")
+    print(f"residual mix - played stems: {res:.1f} dB (lead takes the rest, so this should be ~-90 dB or lower)")
 
 
 def f0_to_notes(t, midi, rms, onsets):
@@ -409,10 +427,15 @@ def splice(made, chroma, energy, grid):
 def song_from_audio(path):
     """-> grid, step_sec, parts, raw notes per part (with the stem they come from, for the samples)."""
     import librosa
+    import numpy as np
     from basic_pitch.inference import predict
     stems = separate(path)
     mix, sr = librosa.load(stems / "mix.wav", sr=22050)
     _, beats = librosa.beat.beat_track(y=mix, sr=sr, hop_length=BEAT_HOP, units="time")
+    bpm = 60 / float(np.median(np.diff(beats)))
+    if bpm > MAX_BPM and not KEEP_BPM:  # octave error: every other beat (e.g. New Person, Same Old Mistakes: 152 -> 76)
+        print(f"beat tracker says {bpm:.0f} bpm: probably eighth notes, using {bpm / 2:.0f} (--keep-bpm to keep {bpm:.0f})")
+        beats = beats[::2]
     grid, step_sec = step_grid(smooth_beats(beats))
     heard = grid[grid < len(mix) / sr]  # the sixteenths inside the recording (for the chroma score)
 
@@ -421,13 +444,8 @@ def song_from_audio(path):
         return [(s, e, p, a, stem) for s, e, p, a, *_ in ev]
 
     print("transcribing the stems (basic-pitch; pYIN and RMVPE for mono lines)...")
-    other, guitar, piano = bp("other"), bp("guitar"), bp("piano")
-    if len(guitar) < MIN_NOTES:
-        print(f"guitar stem nearly empty ({len(guitar)} notes): the guitar plays the 'other' stem, the synth the 'piano' one")
-        guitar, synth = other, piano
-        guitar_stem = "other"
-    else:
-        synth, guitar_stem = piano + other, "guitar"
+    other, guitar, piano = bp("other"), bp("lead"), bp("piano")
+    synth, guitar_stem = piano + other, "lead"
     candidates = {"bass": {"basic-pitch": bp("bass")}, "guitar": {"basic-pitch": guitar},
                   "synth": {"basic-pitch": synth}, "vocals": {"basic-pitch": bp("vocals")}}
     for part, (fmin, fmax) in F0_RANGE.items():
@@ -563,15 +581,27 @@ def song_from_midi(path):
     return grid, step_sec, parts, None, pm.get_end_time()
 
 
+def loose():
+    """Audio/MIDI files dropped straight into data/songs/, waiting to become a song."""
+    return sorted(f for f in SONGS.glob("*") if f.is_file() and f.suffix.lower() in SOURCES) if SONGS.exists() else []
+
+
 def song(arg=None, name=None):
-    """`song file.mp3 [name]`: a new song from a file; `song [name]`: redo an existing one from its source."""
-    path = Path(arg) if arg else None
+    """`song file.mp3 [name]`: a new song from a file; `song [name]`: redo an existing one from its source;
+    `song` alone: the file(s) dropped into data/songs/ (asks which, if several)."""
+    path, title = (Path(arg) if arg else None), None
+    if path is None and loose():
+        files = loose()
+        for i, f in enumerate(files, 1):
+            print(f"  {i}. {f.name}")
+        path = files[0] if len(files) == 1 else files[int(input(f"which file? [1-{len(files)}] ")) - 1]
     if path and path.is_file():
         d = use(SONGS / slugify(name or path.stem))
         d.mkdir(parents=True, exist_ok=True)
         src = d / f"source{path.suffix.lower()}"
-        if path.resolve() != src.resolve():
-            shutil.copy2(path, src)
+        if path.resolve() != src.resolve():  # dropped into data/songs/: move it into its folder; elsewhere: copy
+            (shutil.move if path.resolve().parent == SONGS.resolve() else shutil.copy2)(path, src)
+        title = path.stem  # the file name is the title
     else:
         d = use(pick(arg, need="."))
         src = next(d.glob("source.*"), None)
@@ -581,7 +611,7 @@ def song(arg=None, name=None):
     grid, step_sec, parts, raw, duration = (song_from_midi if midi else song_from_audio)(src)
     n_steps = 1 + max(e[0] for p in parts.values() for e in p["events"])
     old = json.loads((d / "song.json").read_text()) if (d / "song.json").exists() else {}
-    out = {"title": old.get("title", d.name.replace("-", " ").title()), "bpm": round(60 / (step_sec * 4), 1),
+    out = {"title": old.get("title") or title or d.name.replace("-", " ").title(), "bpm": round(60 / (step_sec * 4), 1),
            "step_sec": step_sec, "n_steps": n_steps, "duration": round(duration, 3), "parts": parts,
            "times": [round(float(t), 4) for t in grid[:n_steps]]}  # time (s) in the recording of each sixteenth
     if not midi:
@@ -721,7 +751,8 @@ if __name__ == "__main__":
     elif cmd == "list":
         list_songs()
     elif cmd == "song":
-        song(*args[:2])
+        KEEP_BPM = "--keep-bpm" in args
+        song(*[a for a in args if a != "--keep-bpm"][:2])
     elif cmd in ("check", "score", "samples"):
         use(pick(args[0] if args else None, need="stems/mix.wav" if cmd == "check" else "song.json"))
         {"check": check, "score": score, "samples": samples}[cmd]()
